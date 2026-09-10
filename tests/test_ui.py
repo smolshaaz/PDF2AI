@@ -1,0 +1,115 @@
+from PySide6.QtCore import QMimeData, QUrl, QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtWidgets import QFileDialog
+from pdf2ai.ui.main_window import MainWindow
+
+
+def test_picker_drop_duplicates_remove(qtbot, digital_pdf, monkeypatch):
+    window = MainWindow(startup_check=False)
+    qtbot.addWidget(window)
+    window.show()
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a: ([str(digital_pdf)], ""))
+    qtbot.mouseClick(window.choose, Qt.LeftButton)
+    assert len(window.paths) == 1
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(digital_pdf))])
+    enter = QDragEnterEvent(QPoint(15, 15), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    window.dragEnterEvent(enter)
+    assert enter.isAccepted()
+    drop = QDropEvent(QPointF(15, 15), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    window.dropEvent(drop)
+    assert len(window.paths) == 1
+    window.add_files([str(digital_pdf.parent / "wrong.txt")])
+    assert "Only accessible PDF" in window.message.text()
+    window.table.selectRow(0)
+    qtbot.mouseClick(window.remove, Qt.LeftButton)
+    assert not window.paths
+    window.start_conversion()
+    assert "Add a PDF" in window.message.text()
+
+
+def test_real_background_conversion_responsive(qtbot, digital_pdf):
+    bad = digital_pdf.parent / "corrupt.pdf"
+    bad.write_bytes(b"bad")
+    window = MainWindow(startup_check=False)
+    qtbot.addWidget(window)
+    window.show()
+    window.add_files([str(bad), str(digital_pdf)])
+    ticks = []
+    timer = QTimer(window)
+    timer.timeout.connect(lambda: ticks.append(1))
+    timer.start(10)
+    qtbot.mouseClick(window.convert, Qt.LeftButton)
+    assert not window.convert.isEnabled()
+    qtbot.waitUntil(lambda: window.worker is None, timeout=120000)
+    timer.stop()
+    assert len(ticks) > 10
+    assert window.table.item(0, 2).text() == "Failed"
+    assert window.table.item(1, 2).text() == "Done — review suggested"
+    assert window.open_output.isVisible()
+    assert window.convert.isEnabled()
+
+
+def test_stop_and_close_prompt(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    class BusyWorker:
+        stopped = False
+        def stop_after_current(self):
+            self.stopped = True
+    window = MainWindow(startup_check=False)
+    qtbot.addWidget(window)
+    window.show()
+    fake = BusyWorker()
+    window.worker = fake
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.No)
+    assert not window.close()
+    assert not fake.stopped
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.Yes)
+    assert not window.close()
+    assert fake.stopped and window.close_pending
+    window.worker = None
+    assert window.close()
+
+
+def test_output_dir_default_and_persistence(qtbot, tmp_path, monkeypatch):
+    """Output folder defaults sensibly and persists across window recreations."""
+    from pathlib import Path
+    from PySide6.QtCore import QSettings
+
+    ini = str(tmp_path / "test.ini")
+
+    # Redirect _settings() to an isolated file so the test doesn't touch real
+    # user settings and each call returns the same persistent backing store.
+    monkeypatch.setattr(
+        "pdf2ai.ui.main_window.MainWindow._settings",
+        lambda self: QSettings(ini, QSettings.Format.IniFormat),
+    )
+
+    window1 = MainWindow(startup_check=False)
+    qtbot.addWidget(window1)
+    # Default should be an absolute path ending in "PDF2AI Output"
+    assert Path(window1._output_dir).is_absolute()
+    assert window1._output_dir.name == "PDF2AI Output"
+    assert window1.output_dir_edit.text() == str(window1._output_dir)
+
+    # Simulate user browsing to a custom folder
+    custom = tmp_path / "my_out"
+    custom.mkdir()
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QFileDialog.getExistingDirectory",
+        lambda *a, **kw: str(custom),
+    )
+    qtbot.mouseClick(
+        window1.browse_output,
+        __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.LeftButton,
+    )
+    assert window1._output_dir == custom
+    assert window1.output_dir_edit.text() == str(custom)
+
+    # Second window should restore the saved directory from the same ini file
+    window2 = MainWindow(startup_check=False)
+    qtbot.addWidget(window2)
+    assert window2._output_dir == custom
+    assert window2.output_dir_edit.text() == str(custom)
+
+
