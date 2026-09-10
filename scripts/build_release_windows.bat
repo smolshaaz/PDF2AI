@@ -10,7 +10,12 @@ echo.
 
 REM ── 1. Verify 64-bit Python ─────────────────────────────────────────────
 echo [1/7] Verifying 64-bit Python...
-py -3 -c "import struct, sys; bits=struct.calcsize('P')*8; print(f'Python {sys.version.split()[0]} ({bits}-bit)'); sys.exit(0 if bits==64 else 1)"
+set "PYCMD=py -3"
+py -3 --version >nul 2>&1
+if errorlevel 1 (
+    set "PYCMD=python"
+)
+%PYCMD% -c "import struct, sys; bits=struct.calcsize('P')*8; print(f'Python {sys.version.split()[0]} ({bits}-bit)'); sys.exit(0 if bits==64 else 1)"
 if errorlevel 1 (
     echo.
     echo ERROR: A 64-bit Python 3.x interpreter is required to build PDF2AI.
@@ -26,7 +31,7 @@ REM ── 2. Create / reuse virtual environment ──────────�
 echo.
 echo [2/7] Setting up virtual environment...
 if not exist .venv\Scripts\python.exe (
-    py -3 -m venv .venv
+    %PYCMD% -m venv .venv
     if errorlevel 1 (
         echo ERROR: Failed to create virtual environment.
         exit /b 1
