@@ -31,7 +31,6 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 ; Allow silent upgrade of an existing installation.
 ; Inno Setup will uninstall the previous version before installing the new one.
-InstallMode=classic
 AppendDefaultDirName=no
 DirExistsWarning=no
 ; Wizard appearance
