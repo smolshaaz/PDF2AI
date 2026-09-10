@@ -31,6 +31,7 @@ class MainWindow(QMainWindow):
         self.close_pending = False
         self.successes = 0
         self.failures = 0
+        self._forced_output_dir = Path(output_dir) if output_dir is not None else None
         self.setWindowTitle("PDF2AI")
         self.resize(740, 680)
         self.setMinimumSize(580, 560)
@@ -160,6 +161,10 @@ class MainWindow(QMainWindow):
         return QSettings("PDF2AI", "PDF2AI")
 
     def _load_output_dir(self):
+        if self._forced_output_dir is not None:
+            self._output_dir = self._forced_output_dir
+            self.output_dir_edit.setText(str(self._output_dir))
+            return
         settings = self._settings()
         saved = settings.value("output_dir", None)
         if saved and Path(saved).is_absolute():
