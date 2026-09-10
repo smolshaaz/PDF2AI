@@ -17,7 +17,7 @@ def test_order_preservation_and_utf8(tmp_path):
     ordered, warnings = inspect_chunks([chunk(2, text), chunk(1, "Exact legal wording")], 2)
     output = "".join(markdown_parts("policy.pdf", 2, ordered))
     target = tmp_path / "test.md"
-    target.write_text(output, encoding="utf-8")
+    target.write_text(output, encoding="utf-8", newline="")
     assert target.read_bytes().decode("utf-8") == output
     assert output.index("PAGE 1") < output.index("PAGE 2")
     assert text.replace("\r\n", "\n") in output
