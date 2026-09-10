@@ -26,7 +26,20 @@ smoke = build / "packaged-smoke"
 smoke.mkdir(exist_ok=True)
 for name in ("PASS.txt", "FAIL.txt"):
     (smoke / name).unlink(missing_ok=True)
-subprocess.run([str(binary), "--self-test", str(smoke)], check=True, timeout=300)
+import os
+env = os.environ.copy()
+env["QT_QPA_PLATFORM"] = "offscreen"
+result = subprocess.run([str(binary), "--self-test", str(smoke)], env=env, timeout=300,
+                        capture_output=True, text=True)
+if result.stdout:
+    print(result.stdout)
+if result.stderr:
+    print(result.stderr, file=sys.stderr)
+fail_file = smoke / "FAIL.txt"
+if fail_file.is_file():
+    print(f"\n=== FAIL.txt ===\n{fail_file.read_text(encoding='utf-8')}", file=sys.stderr)
+if result.returncode != 0:
+    raise SystemExit(f"Self-test exited with code {result.returncode}. See output above.")
 if not (smoke / "PASS.txt").is_file():
     raise SystemExit("The bundled application did not pass its smoke test.")
 print(f"Build verified. Distribute the entire folder: {target}")
