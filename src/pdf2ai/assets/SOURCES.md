@@ -5,6 +5,7 @@ distributed under the upstream Apache-2.0 terms.
 
 | File | Upstream URL | SHA-256 |
 |---|---|---|
+| `PP-OCRv6_rec_tiny.onnx` | `https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_tiny.onnx` | `e16e242de5937ad92609223f19bc2aff3727ee40b095f996907c24749bad251b` |
 | `ch_PP-OCRv5_rec_server.onnx` | `https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_server.onnx` | `e09385400eaaaef34ceff54aeb7c4f0f1fe014c27fa8b9905d4709b65746562a` |
 | `arabic_PP-OCRv5_rec_mobile.onnx` | `https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/arabic_PP-OCRv5_rec_mobile.onnx` | `c1192e632d0baa9146ae5b756a0e635e3dc63c1733737ebfd1629e87144e9295` |
 | `arabic_PP-OCRv4_rec_mobile.onnx` | `https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/rec/arabic_PP-OCRv4_rec_mobile.onnx` | `4a9011bef71687bb84288dc86ad2471bd5d37b717ddf672dd156f9e7a5601bac` |

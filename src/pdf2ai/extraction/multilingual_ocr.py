@@ -9,6 +9,7 @@ import numpy as np
 
 _ENGINE = None
 _HANDWRITING = None
+_SMALL = None
 _ARABIC = None
 _ARABIC_V4 = None
 _FONT = None
@@ -39,6 +40,7 @@ def required_assets() -> tuple[Path, ...]:
         asset_path("models", "arabic_PP-OCRv5_rec_mobile.onnx"),
         asset_path("models", "arabic_PP-OCRv4_rec_mobile.onnx"),
         asset_path("fonts", "NotoSansArabic.ttf"),
+        asset_path("models", "PP-OCRv6_rec_tiny.onnx"),
     )
 
 
@@ -85,7 +87,7 @@ def initialize() -> None:
         rapid_logger.propagate = False
         rapid_logger.setLevel(logging.CRITICAL)
 
-        engine = RapidOCR(params=runtime_params())
+        engine = RapidOCR(params={**runtime_params(), "Rec.model_path": str(required_assets()[4]), "Rec.model_type": ModelType.TINY})
         _ARABIC = _make_recognizer(
             required_assets()[1],
             LangRec.ARABIC,
@@ -165,7 +167,7 @@ def _select(primary, handwriting, arabic, arabic_v4):
 
 def full_ocr(image: np.ndarray):
     """Return PyMuPDF4LLM's expected ``(box, text, score)`` tuples."""
-    global LAST_LOW_CONFIDENCE
+    global LAST_LOW_CONFIDENCE, _SMALL
     initialize()
     from rapidocr.ch_ppocr_rec.typings import TextRecInput
     from rapidocr.main import RapidOCRError
@@ -177,20 +179,54 @@ def full_ocr(image: np.ndarray):
         rotated, classification = _ENGINE.cls_and_rotate(crops)
         request = TextRecInput(img=rotated, return_word_box=False)
         primary = _ENGINE.text_rec(request)
-        arabic = _ARABIC(request)
     except RapidOCRError:
         return []
 
     from rapidocr.ch_ppocr_rec.typings import TextRecOutput
     count = len(primary.txts or ())
+    # The orientation classifier can flip an otherwise healthy printed line.
+    # Try the opposite orientation cheaply before loading larger recognizers.
+    indices = [i for i in range(count) if primary.scores[i] < .85]
+    if indices:
+        flipped = [np.ascontiguousarray(np.rot90(rotated[i], 2)) for i in indices]
+        retry = _ENGINE.text_rec(TextRecInput(img=flipped, return_word_box=False))
+        texts, scores = list(primary.txts), list(primary.scores)
+        for i, crop, text, score in zip(indices, flipped, retry.txts or (), retry.scores):
+            if score > scores[i]:
+                rotated[i] = crop
+                texts[i], scores[i] = text, score
+        primary.txts, primary.scores = tuple(texts), tuple(scores)
+    # Retry uncertain tiny-model crops with the larger v6 recognizer. Confident
+    # printed text completes after one recognition pass.
+    indices = [i for i in range(count) if primary.scores[i] < .97]
+    if indices:
+        if _SMALL is None:
+            import rapidocr
+            from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
+            _SMALL = _make_recognizer(Path(rapidocr.__file__).parent / "models" / "PP-OCRv6_rec_small.onnx", LangRec.CH, ModelType.SMALL, OCRVersion.PPOCRV6)
+        retry = _SMALL(TextRecInput(img=[rotated[i] for i in indices], return_word_box=False))
+        texts, scores = list(primary.txts), list(primary.scores)
+        for i, text, score in zip(indices, retry.txts or (), retry.scores):
+            if score > scores[i]:
+                texts[i], scores[i] = text, score
+        primary.txts, primary.scores = tuple(texts), tuple(scores)
+    arabic = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
+    indices = [i for i in range(count) if primary.scores[i] < .97 or
+               any(c.isalpha() and ord(c) > 591 for c in primary.txts[i])]
+    if indices:
+        retry = _ARABIC(TextRecInput(img=[rotated[i] for i in indices], return_word_box=False))
+        texts, scores = list(arabic.txts), list(arabic.scores)
+        for i, text, score in zip(indices, retry.txts or (), retry.scores):
+            texts[i], scores[i] = text, score
+        arabic.txts, arabic.scores = tuple(texts), scores
     handwriting = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
     arabic_v4 = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
     arabic_lines = {
         i for i, (text, score) in enumerate(zip(arabic.txts or (), arabic.scores))
         if _arabic_ratio(text)[0] >= 2 and _arabic_ratio(text)[1] >= .3 and score >= .45
     }
-    # The primary recognizer does not support Arabic. A cheap Arabic pass over
-    # all crops avoids mistaking confidently wrong Latin output for good text.
+    # Route uncertain/non-Latin text to Arabic; reserve the heavy handwriting
+    # recognizer for lines still uncertain after the two v6 passes.
     for is_arabic, target in ((False, handwriting), (True, arabic_v4)):
         if is_arabic:
             indices = [i for i in arabic_lines if arabic.scores[i] < .90]
