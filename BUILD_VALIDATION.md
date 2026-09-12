@@ -2,13 +2,15 @@
 
 Environment: macOS ARM64, Python 3.13.5. Target product: Windows x64 desktop utility.
 
-- `pytest -q`: **22 passed**; seven upstream PyMuPDF SWIG deprecation warnings.
+- `pytest -q`: **26 passed**; seven upstream PyMuPDF SWIG deprecation warnings.
 - Native Qt window launch and conversion self-test: passed.
 - Final `python scripts/build.py`: completed successfully, including its own
   packaged executable smoke test and `PASS.txt` check.
 - Digital text, a basic table, repeated headers/footers and 4-point text: retained
   in actual PyMuPDF4LLM output. Healthy native text test fails if OCR is invoked.
 - Generated image-only PDF: recognized by the official RapidOCR adapter.
+- Generated 150-DPI scan: its 6-point footnote was mangled at 150 OCR DPI and
+  recovered exactly at the production 300-DPI setting.
 - Generated 300-page PDF: **300 page markers and 300 tiny-text footnotes retained**,
   no review warnings; extraction and writing took 108.27 seconds on this host
   while a build was also running. This is a synthetic check, not an accuracy or
@@ -25,8 +27,9 @@ Environment: macOS ARM64, Python 3.13.5. Target product: Windows x64 desktop uti
 ## Local frozen verification
 
 A PyInstaller 6.22.2 standalone executable was built and passed its local
-`--self-test`: Qt window, spawned worker, native extraction, image-only OCR,
-page markers, UTF-8 and a responsive GUI timer. All models were local.
+`--self-test`: Qt window, file-signalled subprocess worker, native extraction,
+image-only OCR, page markers, UTF-8 and a responsive GUI timer. All models were
+local. The worker never uses a multiprocessing pipe.
 The default build script uses this verified freezer. To reproduce the raw
 freezer check separately:
 

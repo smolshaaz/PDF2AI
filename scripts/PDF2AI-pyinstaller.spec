@@ -4,7 +4,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 root = Path(SPECPATH).parent
 data = []
 binaries = []
-hidden = ["pymupdf.layout", "pymupdf4llm.ocr.rapidocr_api", "pymupdf4llm.ocr.rapidocr_391_backend"]
+hidden = [
+    "pdf2ai.workers.worker_cli",
+    "pymupdf.layout",
+    "pymupdf4llm.ocr.rapidocr_api",
+    "pymupdf4llm.ocr.rapidocr_391_backend",
+]
 for package in ["pymupdf", "pymupdf4llm", "rapidocr", "onnxruntime"]:
     data += collect_data_files(package)
     binaries += collect_dynamic_libs(package)

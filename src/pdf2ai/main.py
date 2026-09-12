@@ -1,9 +1,7 @@
-import multiprocessing
 import sys
 
 
 def main():
-    multiprocessing.freeze_support()
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import QStandardPaths
     from pathlib import Path

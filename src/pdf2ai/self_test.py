@@ -44,7 +44,7 @@ def run(folder):
                 text = output.read_text(encoding="utf-8")
                 assert "<!-- PAGE 1 -->" in text
                 assert "flood damage is excluded" in text.lower()
-            (folder / "PASS.txt").write_text("PASS: packaged Qt window, spawned worker, digital PDF, scanned PDF, local OCR, UTF-8, page markers and responsive GUI.\n", encoding="utf-8")
+            (folder / "PASS.txt").write_text("PASS: packaged Qt window, file-signalled worker, digital PDF, scanned PDF, local OCR, UTF-8, page markers and responsive GUI.\n", encoding="utf-8")
             outcome[0] = 0
         except Exception as exc:
             import traceback

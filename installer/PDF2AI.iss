@@ -9,7 +9,7 @@
 ; The end user needs nothing except PDF2AI-Setup.exe.
 
 #define MyAppName      "PDF2AI"
-#define MyAppVersion   "1.0.0"
+#define MyAppVersion   "1.0.1"
 #define MyAppPublisher "PDF2AI"
 #define MyAppExeName   "PDF2AI.exe"
 ; Stable GUID – do NOT change between releases; Inno Setup uses it to detect

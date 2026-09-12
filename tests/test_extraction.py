@@ -62,6 +62,30 @@ def test_scanned_pdf(tmp_path, ocr_state):
     assert not result["warnings"]
 
 
+def test_small_scanned_footnote_uses_fidelity_dpi(tmp_path, ocr_state):
+    """A 6-point legal line in a realistic text block survives OCR."""
+    path = tmp_path / "small-scan.pdf"
+    expected = "SMALL SIX POINT FOOTNOTE: POLICY LIMITS APPLY PER OCCURRENCE."
+    lines = (
+        (5, "TINY FIVE POINT EXCLUSION: WATER SEEPAGE IS NOT COVERED."),
+        (6, expected),
+        (8, "EIGHT POINT CONDITION: WRITTEN NOTICE IS REQUIRED WITHIN 30 DAYS."),
+        (10, "TEN POINT CLAUSE: BENEFITS END WHEN COVERAGE TERMINATES."),
+    )
+    with pymupdf.open() as original:
+        page = original.new_page(width=612, height=792)
+        for row, (size, text) in enumerate(lines):
+            page.insert_text((45, 70 + row * 55), text, fontsize=size)
+        image = page.get_pixmap(dpi=150, alpha=False).tobytes("png")
+    with pymupdf.open() as scan:
+        page = scan.new_page(width=612, height=792)
+        page.insert_image(page.rect, stream=image)
+        scan.save(path)
+    result = convert_pdf(path, ocr_state)
+    text = Path(result["output"]).read_text(encoding="utf-8")
+    assert expected in text
+
+
 def test_corrupt_empty_deleted_encrypted(tmp_path, ocr_state):
     bad = tmp_path / "bad.pdf"
     bad.write_bytes(b"not a PDF")

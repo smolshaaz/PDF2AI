@@ -202,8 +202,9 @@ chunks are ordered by their 1-based metadata. No legacy extraction fallback.
 
 The official `pymupdf4llm.ocr.rapidocr_api.exec_ocr` adapter selects the modern
 RapidOCR backend. Its bundled ONNX models are checked with tiny-image inference
-at startup. Selective OCR preserves healthy native text. The installed Layout
-wrapper's default OCR resolution is **150 DPI**, left unchanged. The legacy
+at startup. Selective OCR preserves healthy native text. OCR pages render at
+**300 DPI**: a regression scan showed the prior 150-DPI setting mangling a
+complete 6-point footnote while 300 DPI recovered it exactly. The legacy
 `fontsize_limit` option is not supported by Layout and is intentionally not
 passed; actual 4-point native text is covered by regression tests.
 
@@ -215,8 +216,9 @@ not an OCR confidence score or a guarantee of correctness.
 
 ## Limitations
 
-Always review critical policy/legal wording against the PDF. OCR can miss or
-misread tiny, blurred, rotated, handwritten or unsupported-language text.
+Always review critical policy/legal wording against the PDF. RapidOCR is aimed
+at printed text. It can miss or misread tiny, blurred, rotated, handwritten or
+unsupported-language text; handwritten pages are not claimed as supported.
 Complex/multi-page tables and unusual reading order can be imperfect. Pictures
 and diagrams are not exported; text retained by the extraction engine is.
 Blank pages are intentionally reported for review. Password-protected PDFs

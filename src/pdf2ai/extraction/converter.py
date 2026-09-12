@@ -92,9 +92,21 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None) -> di
         # Explicit activation fails if Layout is unavailable; never silently fall
         # back to the legacy engine, where OCR/settings have different behavior.
         pymupdf4llm.use_layout(True)
-        options = dict(page_chunks=True, use_ocr=state["available"], force_ocr=False,
-                       header=True, footer=True, force_text=True,
-                       write_images=False, embed_images=False, show_progress=False)
+        options = dict(
+            page_chunks=True,
+            use_ocr=state["available"],
+            force_ocr=False,
+            # A generated 150-DPI scan lost a complete 6-point legal footnote
+            # at 150 OCR DPI and recovered it at 300. Native-text pages still
+            # skip OCR through PyMuPDF4LLM's selective page analysis.
+            ocr_dpi=300,
+            header=True,
+            footer=True,
+            force_text=True,
+            write_images=False,
+            embed_images=False,
+            show_progress=False,
+        )
         if state["available"]:
             from pymupdf4llm.ocr import rapidocr_api
             options["ocr_function"] = rapidocr_api.exec_ocr

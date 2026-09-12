@@ -2,6 +2,7 @@ from PySide6.QtCore import QMimeData, QUrl, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QFileDialog
 from pdf2ai.ui.main_window import MainWindow
+from pdf2ai.workers.conversion_worker import ConversionWorker
 
 
 def test_picker_drop_duplicates_remove(qtbot, digital_pdf, monkeypatch):
@@ -112,4 +113,22 @@ def test_output_dir_default_and_persistence(qtbot, tmp_path, monkeypatch):
     assert window2._output_dir == custom
     assert window2.output_dir_edit.text() == str(custom)
 
+
+def test_worker_crash_reports_exit_without_pipe_error(qtbot, monkeypatch):
+    """A frozen-style worker crash produces one useful event, never BrokenPipe."""
+    import sys
+
+    monkeypatch.setattr(
+        "pdf2ai.workers.conversion_worker._worker_command",
+        lambda job: [sys.executable, "-c", "raise SystemExit(7)"],
+    )
+    worker = ConversionWorker(check_only=True)
+    events = []
+    worker.event.connect(events.append)
+    with qtbot.waitSignal(worker.finished, timeout=5000):
+        worker.start()
+    assert events == [
+        ("fatal", "Extraction worker stopped unexpectedly (exit code 7).")
+    ]
+    assert "BrokenPipe" not in repr(events)
 
