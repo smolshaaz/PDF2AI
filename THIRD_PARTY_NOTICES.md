@@ -10,6 +10,8 @@ runtime distributions. `DEPENDENCIES.txt` includes transitive dependencies.
 | PySide6 / Qt for Python | 6.11.2 | LGPL v3 / GPL alternatives; Qt component terms apply |
 | RapidOCR and its packaged models | 3.9.2 | Apache 2.0 package; retain upstream model notices |
 | ONNX Runtime | 1.29.0 | MIT |
+| python-bidi | 0.6.7 | LGPL-3.0-or-later |
+| Noto Sans Arabic, Caveat | bundled | SIL Open Font License 1.1 |
 | NumPy | installed pinned environment | BSD |
 | OpenCV | installed pinned environment | Apache 2.0 and included third-party notices |
 
@@ -28,5 +30,7 @@ The installed 1.28.2 implementation was inspected directly. Its public
 `to_markdown(*args, **kwargs)` wrapper dispatches to Layout by default. The Layout
 signature supports all options used by PDF2AI and defaults `ocr_dpi` to 150.
 Page chunk metadata supplies `page_number` (1-based); production conversion
-validates it. The official adapter now supports `rapidocr` 3.9.x directly,
-so no custom OCR adapter or monkey-patch is used.
+validates it. PDF2AI uses the official full-OCR callback integration with a
+local RapidOCR ensemble because the default packaged recognizer has no Arabic
+characters. Exact model sources and hashes are recorded in
+`src/pdf2ai/assets/SOURCES.md`.

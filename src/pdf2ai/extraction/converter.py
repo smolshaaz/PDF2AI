@@ -34,14 +34,14 @@ def check_ocr() -> dict:
         missing = [name for name in required if not (models / name).is_file()]
         if missing:
             return {"available": False, "detail": "Bundled OCR models are missing. Reinstall PDF2AI. Missing: " + ", ".join(missing)}
-        from pymupdf4llm.ocr import rapidocr_api
-        if rapidocr_api.full_ocr is None:
-            raise ImportError("RapidOCR adapter unavailable")
-        # Runs a tiny blank image through the official adapter backend. This checks
-        # models, native ONNX libraries and actual inference without any user data.
-        import numpy as np
-        rapidocr_api.full_ocr(np.full((32, 32, 3), 255, dtype=np.uint8))
-        return {"available": True, "detail": "RapidOCR 3.9.2 / ONNX Runtime; bundled local models"}
+        from pdf2ai.extraction import multilingual_ocr
+        # Runs blank pixels through every bundled local inference session. This
+        # checks model files, the OCR font and native ONNX libraries without data.
+        multilingual_ocr.smoke_test()
+        return {
+            "available": True,
+            "detail": "RapidOCR 3.9.2 / ONNX Runtime; PP-OCRv6 detection plus local PP-OCRv5 handwriting and Arabic recognition",
+        }
     except Exception as exc:
         # Exception strings from OCR may include recognized content. Never log them.
         return {"available": False, "detail": f"{type(exc).__module__}.{type(exc).__name__} while initializing local OCR. Reinstall the complete PDF2AI distribution (including its runtime and models)."}
@@ -108,8 +108,8 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None) -> di
             show_progress=False,
         )
         if state["available"]:
-            from pymupdf4llm.ocr import rapidocr_api
-            options["ocr_function"] = rapidocr_api.exec_ocr
+            from pdf2ai.extraction.multilingual_ocr import exec_ocr
+            options["ocr_function"] = exec_ocr
         chunks = pymupdf4llm.to_markdown(doc, **options)
     if not isinstance(chunks, list):
         raise PDFError("The extraction engine returned an unexpected format. Reinstall PDF2AI.")

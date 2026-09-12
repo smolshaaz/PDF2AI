@@ -4,7 +4,9 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 root = Path(SPECPATH).parent
 data = []
 binaries = []
+data += [(str(root / "src" / "pdf2ai" / "assets"), "pdf2ai/assets")]
 hidden = [
+    "pdf2ai.extraction.multilingual_ocr",
     "pdf2ai.workers.worker_cli",
     "pymupdf.layout",
     "pymupdf4llm.ocr.rapidocr_api",

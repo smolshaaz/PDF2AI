@@ -8,10 +8,10 @@ pytestmark = pytest.mark.integration
 
 
 def test_digital_fidelity_and_blank(digital_pdf, ocr_state, monkeypatch):
-    from pymupdf4llm.ocr import rapidocr_api
+    from pdf2ai.extraction import multilingual_ocr
     def unexpected_ocr(*args, **kwargs):
         raise AssertionError("Healthy native text must not be OCRed")
-    monkeypatch.setattr(rapidocr_api, "exec_ocr", unexpected_ocr)
+    monkeypatch.setattr(multilingual_ocr, "exec_ocr", unexpected_ocr)
     result = convert_pdf(digital_pdf, ocr_state)
     output = Path(result["output"]).read_text(encoding="utf-8")
     assert result["pages"] == 3
@@ -60,6 +60,48 @@ def test_scanned_pdf(tmp_path, ocr_state):
     assert "INSURANCE" in text.upper()
     assert "flood damage is excluded" in text.lower()
     assert not result["warnings"]
+
+
+def test_mixed_english_arabic_and_handwriting(tmp_path, ocr_state, qtbot):
+    """One scanned page keeps English handwriting and logical-order Arabic."""
+    from PySide6.QtCore import QRect, Qt
+    from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter
+    from pdf2ai.extraction.multilingual_ocr import asset_path
+
+    english = "Handwritten note: waive the exclusion"
+    arabic = "هذه وثيقة تأمين ويجب مراجعة الشروط"
+    image_path = tmp_path / "mixed.png"
+    image = QImage(1800, 700, QImage.Format.Format_RGB888)
+    image.fill(QColor("white"))
+    painter = QPainter(image)
+    painter.setPen(QColor("black"))
+    caveat_id = QFontDatabase.addApplicationFont(
+        str(asset_path("fonts", "Caveat.ttf"))
+    )
+    arabic_id = QFontDatabase.addApplicationFont(
+        str(asset_path("fonts", "NotoSansArabic.ttf"))
+    )
+    painter.setFont(QFont(QFontDatabase.applicationFontFamilies(caveat_id)[0], 32))
+    painter.drawText(
+        QRect(50, 40, 800, 200), Qt.AlignLeft | Qt.TextWordWrap, english
+    )
+    painter.setFont(QFont(QFontDatabase.applicationFontFamilies(arabic_id)[0], 32))
+    painter.drawText(
+        QRect(950, 40, 800, 200), Qt.AlignRight | Qt.AlignTop | Qt.TextWordWrap, arabic
+    )
+    painter.end()
+    assert image.save(str(image_path))
+
+    path = tmp_path / "mixed.pdf"
+    with pymupdf.open() as scan:
+        page = scan.new_page(width=900, height=350)
+        page.insert_image(page.rect, filename=image_path)
+        scan.save(path)
+    result = convert_pdf(path, ocr_state)
+    text = Path(result["output"]).read_text(encoding="utf-8")
+    assert english in text
+    assert arabic in text
+    assert arabic[::-1] not in text
 
 
 def test_small_scanned_footnote_uses_fidelity_dpi(tmp_path, ocr_state):

@@ -200,13 +200,19 @@ ONNX Runtime 1.29.0, PySide6 6.11.2. One whole-document `to_markdown()` call use
 `use_ocr=True`, `force_ocr=False`, and disables written/embedded images. Page
 chunks are ordered by their 1-based metadata. No legacy extraction fallback.
 
-The official `pymupdf4llm.ocr.rapidocr_api.exec_ocr` adapter selects the modern
-RapidOCR backend. Its bundled ONNX models are checked with tiny-image inference
-at startup. Selective OCR preserves healthy native text. OCR pages render at
-**300 DPI**: a regression scan showed the prior 150-DPI setting mangling a
-complete 6-point footnote while 300 DPI recovered it exactly. The legacy
-`fontsize_limit` option is not supported by Layout and is intentionally not
-passed; actual 4-point native text is covered by regression tests.
+The OCR callback uses PyMuPDF4LLM's official full-OCR integration with one
+RapidOCR detection pass and an automatic local recognition ensemble: PP-OCRv6,
+the PP-OCRv5 server model for difficult English and handwriting, and dedicated
+PP-OCRv5/PP-OCRv4 Arabic models. A bundled Noto Arabic font preserves the OCR
+text layer and bidirectional text is normalized so the final Markdown contains
+logical-order Arabic. Mixed English/Arabic scanned pages require no setting.
+All models are checked with tiny-image inference at startup.
+
+Selective OCR preserves healthy native text. OCR pages render at **300 DPI**:
+a regression scan showed the prior 150-DPI setting mangling a complete 6-point
+footnote while 300 DPI recovered it exactly. The legacy `fontsize_limit` option
+is not supported by Layout and is intentionally not passed; actual 4-point
+native text is covered by regression tests.
 
 If OCR is unavailable, native extraction remains usable, the window warns that
 scanned pages cannot be recognized, and every output is marked for review.
@@ -216,9 +222,11 @@ not an OCR confidence score or a guarantee of correctness.
 
 ## Limitations
 
-Always review critical policy/legal wording against the PDF. RapidOCR is aimed
-at printed text. It can miss or misread tiny, blurred, rotated, handwritten or
-unsupported-language text; handwritten pages are not claimed as supported.
+Always review critical policy/legal wording against the PDF. The bundled models
+substantially improve printed English, printed Arabic and English handwriting,
+but OCR can still miss or misread tiny, blurred, rotated, unusual handwriting,
+or Arabic handwriting. It cannot guarantee the accuracy of a vision-language
+model on arbitrary handwriting.
 Complex/multi-page tables and unusual reading order can be imperfect. Pictures
 and diagrams are not exported; text retained by the extraction engine is.
 Blank pages are intentionally reported for review. Password-protected PDFs

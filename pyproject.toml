@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf2ai-desktop"
-version = "1.0.1"
+version = "1.1.0"
 description = "Private local desktop PDF to Markdown conversion"
 requires-python = ">=3.11,<3.15"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
   "pymupdf4llm==1.28.2",
   "rapidocr==3.9.2",
   "onnxruntime==1.29.0",
+  "python-bidi==0.6.7",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,9 @@ pdf2ai = "pdf2ai.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+pdf2ai = ["assets/SOURCES.md", "assets/fonts/*", "assets/models/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
