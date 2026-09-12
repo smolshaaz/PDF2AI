@@ -54,14 +54,18 @@ def run_job(job_path) -> int:
             try:
                 from pdf2ai.extraction.converter import check_ocr, convert_pdf
 
-                state = check_ocr()
+                state = check_ocr(lightweight=True)
                 append_event(event_file, ("ocr", state))
                 if not check_only:
                     run_batch(
                         paths,
                         lambda event: append_event(event_file, event),
                         stop_file.exists,
-                        lambda path: convert_pdf(path, state, output_dir),
+                        lambda path: convert_pdf(
+                            path, state, output_dir,
+                            progress=lambda done, total, stage, seconds: append_event(event_file, ("progress", done, total, stage, seconds)),
+                            temp_prefix=job.get("temp_prefix", ".pdf2ai-"),
+                        ),
                     )
                 return 0
             except BaseException as exc:

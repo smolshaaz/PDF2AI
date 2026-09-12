@@ -1,4 +1,4 @@
-"""Whole-document PyMuPDF4LLM extraction; no content rewriting or networking."""
+"""Page-progress PyMuPDF4LLM extraction; no content rewriting or networking."""
 import errno
 import os
 from pathlib import Path
@@ -23,7 +23,7 @@ def enforce_offline():
         _OFFLINE = True
 
 
-def check_ocr() -> dict:
+def check_ocr(lightweight=False) -> dict:
     enforce_offline()
     try:
         import onnxruntime
@@ -35,12 +35,16 @@ def check_ocr() -> dict:
         if missing:
             return {"available": False, "detail": "Bundled OCR models are missing. Reinstall PDF2AI. Missing: " + ", ".join(missing)}
         from pdf2ai.extraction import multilingual_ocr
-        # Runs blank pixels through every bundled local inference session. This
-        # checks model files, the OCR font and native ONNX libraries without data.
-        multilingual_ocr.smoke_test()
+        # Startup checks files/imports only. Conversion initializes sessions
+        # lazily when scanned content is encountered.
+        missing = [p.name for p in multilingual_ocr.required_assets() if not p.is_file()]
+        if missing:
+            raise FileNotFoundError("Missing bundled OCR assets")
+        if not lightweight:
+            multilingual_ocr.smoke_test()
         return {
             "available": True,
-            "detail": "RapidOCR 3.9.2 / ONNX Runtime; PP-OCRv6 detection plus local PP-OCRv5 handwriting and Arabic recognition",
+            "detail": "RapidOCR 3.9.2 / ONNX Runtime; batched PP-OCRv6 with selective handwriting/Arabic retries",
         }
     except Exception as exc:
         # Exception strings from OCR may include recognized content. Never log them.
@@ -65,7 +69,7 @@ def friendly_error(exc: Exception) -> str:
     return "This PDF could not be converted. It may be damaged or use an unsupported format. Try opening it in a PDF viewer."
 
 
-def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None) -> dict:
+def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progress=None, temp_prefix=".pdf2ai-") -> dict:
     enforce_offline()
     import pymupdf4llm
     import pymupdf
@@ -107,20 +111,41 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None) -> di
             embed_images=False,
             show_progress=False,
         )
-        if state["available"]:
-            from pdf2ai.extraction.multilingual_ocr import exec_ocr
-            options["ocr_function"] = exec_ocr
-        chunks = pymupdf4llm.to_markdown(doc, **options)
+        from pdf2ai.extraction import multilingual_ocr
+        def report(done, stage):
+            if progress:
+                progress(done, count, stage, time.monotonic() - started)
+        chunks = []
+        uncertain = []
+        # Modern Layout analyzes individual pages. Keep the same document open
+        # and retain only Markdown/metadata, releasing image/layout data per page.
+        for page_number in range(count):
+            report(page_number, "Reading page")
+            multilingual_ocr.LAST_LOW_CONFIDENCE = False
+            if state["available"]:
+                def recognize(*args, **kwargs):
+                    report(page_number, "Recognizing scanned text")
+                    return multilingual_ocr.exec_ocr(*args, **kwargs)
+                options["ocr_function"] = recognize
+            page_chunks = pymupdf4llm.to_markdown(doc, pages=[page_number], **options)
+            if not isinstance(page_chunks, list):
+                raise PDFError("The extraction engine returned an unexpected format. Reinstall PDF2AI.")
+            chunks.extend({"metadata": c["metadata"], "text": c["text"]} for c in page_chunks)
+            if multilingual_ocr.LAST_LOW_CONFIDENCE:
+                uncertain.append(page_number + 1)
+            report(page_number + 1, "Page complete")
     if not isinstance(chunks, list):
         raise PDFError("The extraction engine returned an unexpected format. Reinstall PDF2AI.")
     ordered, warnings = inspect_chunks(chunks, count)
+    if uncertain:
+        warnings.append("Some text was difficult to recognize; review pages: " + ", ".join(map(str, uncertain)))
     if not state["available"]:
         warnings.insert(0, "Scanned pages could not be recognized because local OCR is unavailable. This output may be incomplete.")
     folder = output_dir if output_dir is not None else source.parent / "PDF2AI Output"
     folder.mkdir(parents=True, exist_ok=True)
     temp = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", prefix=".pdf2ai-", suffix=".tmp", dir=folder, delete=False) as stream:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", prefix=temp_prefix, suffix=".tmp", dir=folder, delete=False) as stream:
             temp = Path(stream.name)
             for part in markdown_parts(source.name, count, ordered):
                 stream.write(part)

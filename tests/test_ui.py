@@ -57,15 +57,18 @@ def test_stop_and_close_prompt(qtbot, monkeypatch):
         stopped = False
         def stop_after_current(self):
             self.stopped = True
+        def stop_now(self):
+            self.stopped = True
     window = MainWindow(startup_check=False)
     qtbot.addWidget(window)
     window.show()
     fake = BusyWorker()
     window.worker = fake
-    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.No)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: next(b for b in self.buttons() if b.text() == "Keep running"))
     assert not window.close()
     assert not fake.stopped
-    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.Yes)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: next(b for b in self.buttons() if b.text() == "Stop now and close"))
     assert not window.close()
     assert fake.stopped and window.close_pending
     window.worker = None
@@ -132,3 +135,30 @@ def test_worker_crash_reports_exit_without_pipe_error(qtbot, monkeypatch):
     ]
     assert "BrokenPipe" not in repr(events)
 
+
+def test_stop_now_terminates_busy_process(qtbot, monkeypatch):
+    import sys
+    monkeypatch.setattr("pdf2ai.workers.conversion_worker._worker_command",
+                        lambda job: [sys.executable, "-c", "import time; time.sleep(60)"])
+    worker = ConversionWorker()
+    events = []
+    worker.event.connect(events.append)
+    worker.start()
+    qtbot.waitUntil(lambda: worker._process is not None, timeout=5000)
+    with qtbot.waitSignal(worker.finished, timeout=5000):
+        worker.stop_now()
+    assert worker._process is None
+    assert not events
+
+
+def test_page_progress(qtbot, digital_pdf):
+    window = MainWindow(startup_check=False)
+    qtbot.addWidget(window)
+    window.add_files([str(digital_pdf)])
+    window.batch_rows = [0]
+    window.on_event(("started", 0, str(digital_pdf)))
+    window.on_event(("progress", 3, 500, "Reading page", 5.0))
+    assert window.progress.value() == 3
+    assert window.progress.maximum() == 500
+    assert "3/500" in window.message.text()
+    assert "min left" in window.message.text()

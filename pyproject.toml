@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf2ai-desktop"
-version = "1.1.0"
+version = "1.2.0"
 description = "Private local desktop PDF to Markdown conversion"
 requires-python = ">=3.11,<3.15"
 dependencies = [

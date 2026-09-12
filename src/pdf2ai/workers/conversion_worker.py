@@ -39,6 +39,7 @@ class ConversionWorker(QThread):
         self.check_only = check_only
         self.output_dir = str(output_dir) if output_dir is not None else None
         self.stop_requested = threading.Event()
+        self.abort_requested = threading.Event()
         self._stop_file: Optional[Path] = None
         self._process: Optional[subprocess.Popen] = None
 
@@ -51,6 +52,10 @@ class ConversionWorker(QThread):
             except OSError:
                 # The worker also checks the in-memory flag before it starts.
                 pass
+
+    def stop_now(self):
+        self.stop_requested.set()
+        self.abort_requested.set()
 
     def _emit_available_events(self, event_file: Path, offset: int, pending: bytes):
         if not event_file.exists():
@@ -88,6 +93,7 @@ class ConversionWorker(QThread):
                 job_file = temp / "job.json"
                 event_file = temp / "events.jsonl"
                 self._stop_file = temp / "stop"
+                temp_prefix = "." + temp.name + "-"
                 job_file.write_text(
                     json.dumps(
                         {
@@ -96,6 +102,7 @@ class ConversionWorker(QThread):
                             "output_dir": self.output_dir,
                             "event_file": str(event_file),
                             "stop_file": str(self._stop_file),
+                            "temp_prefix": temp_prefix,
                         },
                         ensure_ascii=False,
                     ),
@@ -116,6 +123,14 @@ class ConversionWorker(QThread):
                 offset = 0
                 pending = b""
                 while self._process.poll() is None:
+                    if self.abort_requested.is_set():
+                        self._process.terminate()
+                        try:
+                            self._process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            self._process.kill()
+                            self._process.wait()
+                        break
                     offset, pending, new_fatal = self._emit_available_events(
                         event_file, offset, pending
                     )
@@ -125,10 +140,15 @@ class ConversionWorker(QThread):
                     event_file, offset, pending
                 )
                 fatal_seen = fatal_seen or new_fatal
-                if pending.strip():
+                if pending.strip() and not self.abort_requested.is_set():
                     self.event.emit(("fatal", "Worker event data was incomplete."))
                     fatal_seen = True
-                if self._process.returncode and not fatal_seen:
+                if self.abort_requested.is_set():
+                    folders = {Path(self.output_dir)} if self.output_dir else {Path(p).parent / "PDF2AI Output" for p in self.paths}
+                    for folder in folders:
+                        for partial in folder.glob(temp_prefix + "*.tmp"):
+                            partial.unlink(missing_ok=True)
+                if self._process.returncode and not fatal_seen and not self.abort_requested.is_set():
                     self.event.emit(
                         (
                             "fatal",

@@ -12,7 +12,9 @@ def test_digital_fidelity_and_blank(digital_pdf, ocr_state, monkeypatch):
     def unexpected_ocr(*args, **kwargs):
         raise AssertionError("Healthy native text must not be OCRed")
     monkeypatch.setattr(multilingual_ocr, "exec_ocr", unexpected_ocr)
-    result = convert_pdf(digital_pdf, ocr_state)
+    events = []
+    result = convert_pdf(digital_pdf, ocr_state, progress=lambda *event: events.append(event))
+    assert [e[0] for e in events if e[2] == "Page complete"] == [1, 2, 3]
     output = Path(result["output"]).read_text(encoding="utf-8")
     assert result["pages"] == 3
     assert output.count("<!-- PAGE ") == 3

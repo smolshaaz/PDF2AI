@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QProgressBar, QMessageBox, QPlainTextEdit, QAbstractItemView, QMenu,
-    QLineEdit,
+    QLineEdit, QDialog, QSpinBox,
 )
 from pdf2ai.utils.paths import path_key
 from pdf2ai.workers.conversion_worker import ConversionWorker
@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(580, 560)
         self.setAcceptDrops(True)
         root = QWidget()
+        root.setObjectName("centralwidget")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(28, 24, 28, 24)
@@ -68,6 +69,7 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setAcceptDrops(False)
+        self.table.cellDoubleClicked.connect(lambda row, col: self.preview_output(row))
         layout.addWidget(self.table, 1)
         controls = QHBoxLayout()
         self.remove = QPushButton("Remove selected")
@@ -112,16 +114,20 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         layout.addWidget(self.progress)
         bottom = QHBoxLayout()
-        self.cancel = QPushButton("Stop after current PDF")
+        self.cancel = QPushButton("Stop now")
         self.cancel.clicked.connect(self.stop)
         self.cancel.hide()
         self.open_output = QPushButton("Open Output Folder")
         self.open_output.clicked.connect(self.open_folders)
         self.open_output.hide()
+        self.preview = QPushButton("View output")
+        self.preview.clicked.connect(lambda: self.preview_output(self.table.currentRow()))
+        self.preview.hide()
         self.details_button = QPushButton("Details")
         self.details_button.setCheckable(True)
         bottom.addWidget(self.cancel)
         bottom.addWidget(self.open_output)
+        bottom.addWidget(self.preview)
         bottom.addStretch()
         bottom.addWidget(self.details_button)
         layout.addLayout(bottom)
@@ -145,9 +151,12 @@ class MainWindow(QMainWindow):
             QPushButton#primary:disabled { background: #a7bce7; }
             QTableWidget { background: white; alternate-background-color: #f7f9fc; border: 1px solid #dce2ea; border-radius: 6px; gridline-color: #edf0f5; }
             QHeaderView::section { background: #edf1f7; border: 0; padding: 9px; font-weight: 600; }
-            QProgressBar { border: none; background: #e2e9f3; border-radius: 4px; height: 8px; }
+            QProgressBar { border: none; background: #e2e9f3; border-radius: 4px; min-height: 22px; text-align: center; }
             QProgressBar::chunk { background: #265fd5; border-radius: 4px; }
             QLineEdit#outputpath { background: #f3f6fb; border: 1px solid #ccd4df; border-radius: 6px; padding: 6px 10px; color: #3a4a5c; }
+            QPlainTextEdit { background: #ffffff; color: #243143; selection-background-color: #265fd5; selection-color: white; border: 1px solid #ccd4df; padding: 8px; }
+            QDialog, QMessageBox { background: #f7f8fa; }
+            QSpinBox { background: white; color: #243143; padding: 5px; }
         ''')
         if startup_check:
             self.set_busy(True)
@@ -297,6 +306,17 @@ class MainWindow(QMainWindow):
             self.active_row = row
             self.table.item(row, 2).setText("Processing")
             self.message.setText(f"Processing {self.paths[row].name} — file {event[1] + 1} of {len(self.batch_rows)}")
+            self.progress.setRange(0, 0)
+        elif kind == "progress" and self.active_row is not None:
+            done, total, stage, seconds = event[1:]
+            self.progress.setRange(0, total)
+            self.progress.setValue(done)
+            self.progress.setFormat(f"{done} / {total} pages · %p%")
+            self.table.item(self.active_row, 1).setText(str(total))
+            self.table.item(self.active_row, 2).setText(f"Processing {done}/{total}")
+            eta = f" · about {max(1, round(seconds / done * (total - done) / 60))} min left" if done >= 3 and done < total else ""
+            file_index = self.batch_rows.index(self.active_row) + 1
+            self.message.setText(f"{self.paths[self.active_row].name} · file {file_index}/{len(self.batch_rows)}\n{stage} · {done}/{total} pages · {int(seconds)//60}m {int(seconds)%60}s elapsed{eta}")
         elif kind == "result":
             row = self.batch_rows[event[1]]
             result = event[2]
@@ -310,6 +330,9 @@ class MainWindow(QMainWindow):
                 self.table.item(row, 1).setText(str(result["pages"]))
                 self.outputs.add(str(Path(result["output"]).parent))
                 self.open_output.show()
+                self.preview.show()
+                self.table.item(row, 0).setData(Qt.UserRole, result["output"])
+                self.table.selectRow(row)
                 detail = f"{self.paths[row].name} → {result['output']}"
                 if result["warnings"]:
                     detail += "\n" + "\n".join(result["warnings"])
@@ -340,6 +363,9 @@ class MainWindow(QMainWindow):
         stopped = self.worker.stop_requested.is_set()
         self.worker.deleteLater()
         self.worker = None
+        if self.active_row is not None:
+            self.table.item(self.active_row, 2).setText("Stopped — ready to retry" if stopped else "Failed")
+            self.active_row = None
         self.progress.hide()
         self.cancel.hide()
         self.set_busy(False)
@@ -357,9 +383,59 @@ class MainWindow(QMainWindow):
 
     def stop(self):
         if self.worker:
-            self.worker.stop_after_current()
+            self.worker.stop_now()
             self.cancel.setEnabled(False)
-            self.message.setText("Stopping after the current PDF finishes safely…")
+            self.message.setText("Stopping local processing…")
+
+    def preview_output(self, row):
+        item = self.table.item(row, 0) if row >= 0 else None
+        output = item.data(Qt.UserRole) if item else None
+        if not output:
+            self.message.setText("Select a completed PDF to view its output.")
+            return
+        path = Path(output)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(path.name)
+        dialog.resize(850, 650)
+        layout = QVBoxLayout(dialog)
+        name = QLabel(str(path))
+        name.setWordWrap(True)
+        name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(name)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Page"))
+        page = QSpinBox()
+        page.setRange(1, int(self.table.item(row, 1).text()))
+        controls.addWidget(page)
+        controls.addStretch()
+        for label, target in (("Open file", path), ("Open folder", path.parent)):
+            button = QPushButton(label)
+            button.clicked.connect(lambda checked=False, p=target: QDesktopServices.openUrl(QUrl.fromLocalFile(str(p))))
+            controls.addWidget(button)
+        layout.addLayout(controls)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        layout.addWidget(text)
+        def show_page(number):
+            # Stream to the requested page: never render a 500-page Markdown
+            # document into Qt's text layout engine just to show a preview.
+            try:
+                lines = []
+                active = False
+                with path.open(encoding="utf-8") as stream:
+                    for line in stream:
+                        if line.startswith("<!-- PAGE "):
+                            if active:
+                                break
+                            active = line.strip() == f"<!-- PAGE {number} -->"
+                        if active:
+                            lines.append(line)
+                text.setPlainText("".join(lines))
+            except OSError:
+                text.setPlainText("The output file could not be opened. It may have been moved or deleted.")
+        page.valueChanged.connect(show_page)
+        show_page(1)
+        dialog.exec()
 
     def open_folders(self):
         folders = sorted(self.outputs)
@@ -376,9 +452,20 @@ class MainWindow(QMainWindow):
             event.ignore()
             if self.close_pending:
                 return
-            answer = QMessageBox.question(self, "Processing is active", "Stop after the current PDF finishes safely, then close?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer == QMessageBox.Yes:
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle("Processing is active")
+            prompt.setText("Choose what happens to the current conversion.")
+            keep = prompt.addButton("Keep running", QMessageBox.RejectRole)
+            finish = prompt.addButton("Close when this PDF finishes", QMessageBox.AcceptRole)
+            stop = prompt.addButton("Stop now and close", QMessageBox.DestructiveRole)
+            prompt.setDefaultButton(keep)
+            prompt.exec()
+            if prompt.clickedButton() == stop:
                 self.close_pending = True
                 self.stop()
+            elif prompt.clickedButton() == finish:
+                self.close_pending = True
+                self.worker.stop_after_current()
+                self.message.setText("This window will close when the current PDF finishes.")
         else:
             event.accept()

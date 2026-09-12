@@ -1,6 +1,7 @@
 """Automatic local English, handwriting, and Arabic OCR for PyMuPDF4LLM."""
 from importlib.resources import files
 import logging
+import os
 from pathlib import Path
 import threading
 
@@ -12,6 +13,19 @@ _ARABIC = None
 _ARABIC_V4 = None
 _FONT = None
 _LOCK = threading.Lock()
+LAST_LOW_CONFIDENCE = False
+
+
+def runtime_params():
+    # Bound competing ONNX thread pools on office laptops; recognize sorted
+    # line crops in batches without running four models over the whole page.
+    return {
+        "Global.log_level": "critical",
+        "Global.text_score": 0.0,
+        "Rec.rec_batch_num": 16,
+        "EngineConfig.onnxruntime.intra_op_num_threads": min(4, os.cpu_count() or 2),
+        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+    }
 
 
 def asset_path(*parts: str) -> Path:
@@ -37,7 +51,7 @@ def _make_recognizer(model: Path, language, model_type, ocr_version):
     cfg = ParseParams.update_batch(
         cfg,
         {
-            "Global.log_level": "critical",
+            **runtime_params(),
             "Rec.model_path": str(model),
             "Rec.ocr_version": ocr_version,
             "Rec.lang_type": language,
@@ -71,10 +85,7 @@ def initialize() -> None:
         rapid_logger.propagate = False
         rapid_logger.setLevel(logging.CRITICAL)
 
-        _ENGINE = RapidOCR(params={"Global.log_level": "critical"})
-        _HANDWRITING = _make_recognizer(
-            required_assets()[0], LangRec.CH, ModelType.SERVER, OCRVersion.PPOCRV5
-        )
+        engine = RapidOCR(params=runtime_params())
         _ARABIC = _make_recognizer(
             required_assets()[1],
             LangRec.ARABIC,
@@ -83,10 +94,20 @@ def initialize() -> None:
         )
         # PP-OCRv4's Arabic ONNX model emits logical-order text. Marking the
         # recognizer as English prevents RapidOCR from reversing it for display.
-        _ARABIC_V4 = _make_recognizer(
-            required_assets()[2], LangRec.EN, ModelType.MOBILE, OCRVersion.PPOCRV4
-        )
         _FONT = pymupdf.Font(fontfile=str(required_assets()[3]))
+        _ENGINE = engine
+
+
+def fallback_recognizer(arabic=False):
+    global _HANDWRITING, _ARABIC_V4
+    from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
+    if arabic:
+        if _ARABIC_V4 is None:
+            _ARABIC_V4 = _make_recognizer(required_assets()[2], LangRec.EN, ModelType.MOBILE, OCRVersion.PPOCRV4)
+        return _ARABIC_V4
+    if _HANDWRITING is None:
+        _HANDWRITING = _make_recognizer(required_assets()[0], LangRec.CH, ModelType.SERVER, OCRVersion.PPOCRV5)
+    return _HANDWRITING
 
 
 def _arabic_ratio(text: str) -> tuple[int, float]:
@@ -144,6 +165,7 @@ def _select(primary, handwriting, arabic, arabic_v4):
 
 def full_ocr(image: np.ndarray):
     """Return PyMuPDF4LLM's expected ``(box, text, score)`` tuples."""
+    global LAST_LOW_CONFIDENCE
     initialize()
     from rapidocr.ch_ppocr_rec.typings import TextRecInput
     from rapidocr.main import RapidOCRError
@@ -155,15 +177,33 @@ def full_ocr(image: np.ndarray):
         rotated, classification = _ENGINE.cls_and_rotate(crops)
         request = TextRecInput(img=rotated, return_word_box=False)
         primary = _ENGINE.text_rec(request)
-        handwriting = _HANDWRITING(request)
         arabic = _ARABIC(request)
-        arabic_v4 = _ARABIC_V4(request)
     except RapidOCRError:
         return []
 
-    primary.txts, primary.scores = _select(
-        primary, handwriting, arabic, arabic_v4
-    )
+    from rapidocr.ch_ppocr_rec.typings import TextRecOutput
+    count = len(primary.txts or ())
+    handwriting = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
+    arabic_v4 = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
+    arabic_lines = {
+        i for i, (text, score) in enumerate(zip(arabic.txts or (), arabic.scores))
+        if _arabic_ratio(text)[0] >= 2 and _arabic_ratio(text)[1] >= .3 and score >= .45
+    }
+    # The primary recognizer does not support Arabic. A cheap Arabic pass over
+    # all crops avoids mistaking confidently wrong Latin output for good text.
+    for is_arabic, target in ((False, handwriting), (True, arabic_v4)):
+        if is_arabic:
+            indices = [i for i in arabic_lines if arabic.scores[i] < .90]
+        else:
+            indices = [i for i in range(count) if i not in arabic_lines and primary.scores[i] < .97]
+        if indices:
+            retry = fallback_recognizer(is_arabic)(TextRecInput(img=[rotated[i] for i in indices], return_word_box=False))
+            texts, scores = list(target.txts), list(target.scores)
+            for i, text, score in zip(indices, retry.txts or (), retry.scores):
+                texts[i], scores[i] = text, score
+            target.txts, target.scores = tuple(texts), scores
+    primary.txts, primary.scores = _select(primary, handwriting, arabic, arabic_v4)
+    LAST_LOW_CONFIDENCE = any(score < .80 for score in primary.scores)
     result = _ENGINE.build_final_output(
         original, detection, classification, primary, crops, operations
     )
@@ -182,7 +222,7 @@ def smoke_test() -> None:
     _ENGINE.text_det(blank_page)
     _ENGINE.text_cls([blank_line])
     request = TextRecInput(img=[blank_line], return_word_box=False)
-    for recognizer in (_ENGINE.text_rec, _HANDWRITING, _ARABIC, _ARABIC_V4):
+    for recognizer in (_ENGINE.text_rec, _ARABIC):
         recognizer(request)
     if not _FONT.has_glyph(ord("A")) or not _FONT.has_glyph(ord("ه")):
         raise RuntimeError("Bundled OCR font lacks required glyphs")
