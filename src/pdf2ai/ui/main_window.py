@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QProgressBar, QMessageBox, QPlainTextEdit, QAbstractItemView, QMenu,
-    QLineEdit, QDialog, QSpinBox,
+    QLineEdit,
 )
 from pdf2ai.utils.paths import path_key
 from pdf2ai.workers.conversion_worker import ConversionWorker
@@ -123,11 +123,14 @@ class MainWindow(QMainWindow):
         self.preview = QPushButton("View output")
         self.preview.clicked.connect(lambda: self.preview_output(self.table.currentRow()))
         self.preview.hide()
+        self.open_markdown = QPushButton("Open Markdown…")
+        self.open_markdown.clicked.connect(self.choose_markdown)
         self.details_button = QPushButton("Details")
         self.details_button.setCheckable(True)
         bottom.addWidget(self.cancel)
         bottom.addWidget(self.open_output)
         bottom.addWidget(self.preview)
+        bottom.addWidget(self.open_markdown)
         bottom.addStretch()
         bottom.addWidget(self.details_button)
         layout.addLayout(bottom)
@@ -309,6 +312,7 @@ class MainWindow(QMainWindow):
             self.progress.setRange(0, 0)
         elif kind == "progress" and self.active_row is not None:
             done, total, stage, seconds = event[1:]
+            self.logger.info("%s page %s/%s: %s (%.1fs elapsed)", self.paths[self.active_row].name, min(done + 1, total), total, stage, seconds)
             self.progress.setRange(0, total)
             self.progress.setValue(done)
             self.progress.setFormat(f"{done} / {total} pages · %p%")
@@ -324,6 +328,8 @@ class MainWindow(QMainWindow):
             if result["ok"]:
                 self.successes += 1
                 self.logger.info("Converted %s: %s pages in %s seconds", self.paths[row], result["pages"], result["seconds"])
+                if result.get("timings"):
+                    self.logger.info("Page timings for %s: %s", self.paths[row].name, result["timings"])
                 status = "Done — review suggested" if result["warnings"] else "Done"
                 self.table.item(row, 2).setText(status)
                 self.table.item(row, 2).setForeground(QColor("#926000" if result["warnings"] else "#157347"))
@@ -394,48 +400,22 @@ class MainWindow(QMainWindow):
             self.message.setText("Select a completed PDF to view its output.")
             return
         path = Path(output)
-        dialog = QDialog(self)
-        dialog.setWindowTitle(path.name)
-        dialog.resize(850, 650)
-        layout = QVBoxLayout(dialog)
-        name = QLabel(str(path))
-        name.setWordWrap(True)
-        name.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(name)
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Page"))
-        page = QSpinBox()
-        page.setRange(1, int(self.table.item(row, 1).text()))
-        controls.addWidget(page)
-        controls.addStretch()
-        for label, target in (("Open file", path), ("Open folder", path.parent)):
-            button = QPushButton(label)
-            button.clicked.connect(lambda checked=False, p=target: QDesktopServices.openUrl(QUrl.fromLocalFile(str(p))))
-            controls.addWidget(button)
-        layout.addLayout(controls)
-        text = QPlainTextEdit()
-        text.setReadOnly(True)
-        layout.addWidget(text)
-        def show_page(number):
-            # Stream to the requested page: never render a 500-page Markdown
-            # document into Qt's text layout engine just to show a preview.
-            try:
-                lines = []
-                active = False
-                with path.open(encoding="utf-8") as stream:
-                    for line in stream:
-                        if line.startswith("<!-- PAGE "):
-                            if active:
-                                break
-                            active = line.strip() == f"<!-- PAGE {number} -->"
-                        if active:
-                            lines.append(line)
-                text.setPlainText("".join(lines))
-            except OSError:
-                text.setPlainText("The output file could not be opened. It may have been moved or deleted.")
-        page.valueChanged.connect(show_page)
-        show_page(1)
+        from pdf2ai.ui.output_viewer import OutputViewer
+        dialog = OutputViewer(path, int(self.table.item(row, 1).text()), self)
         dialog.exec()
+
+    def choose_markdown(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Open saved Markdown", str(self._output_dir), "Markdown files (*.md)")
+        if not filename:
+            return
+        try:
+            from pdf2ai.utils.markdown import iter_pages
+            from pdf2ai.ui.output_viewer import OutputViewer
+            path = Path(filename)
+            count = max((number for number, text in iter_pages(path)), default=1)
+            OutputViewer(path, count, self).exec()
+        except (OSError, UnicodeError):
+            self.message.setText("This Markdown file could not be opened. Check the file and its location.")
 
     def open_folders(self):
         folders = sorted(self.outputs)

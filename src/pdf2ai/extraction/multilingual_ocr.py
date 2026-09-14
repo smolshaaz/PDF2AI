@@ -1,281 +1,253 @@
-"""Automatic local English, handwriting, and Arabic OCR for PyMuPDF4LLM."""
+"""Local printed-document OCR: fast recognition, targeted language/quality retries."""
 from importlib.resources import files
 import logging
 import os
 from pathlib import Path
 import threading
-
+import time
 import numpy as np
 
-_ENGINE = None
-_HANDWRITING = None
-_SMALL = None
-_ARABIC = None
-_ARABIC_V4 = None
-_FONT = None
+_ENGINE = _SMALL = _ARABIC = _ARABIC_V4 = _FONT = None
 _LOCK = threading.Lock()
 LAST_LOW_CONFIDENCE = False
+LAST_METRICS = {}
 
 
-def runtime_params():
-    # Bound competing ONNX thread pools on office laptops; recognize sorted
-    # line crops in batches without running four models over the whole page.
-    return {
-        "Global.log_level": "critical",
-        "Global.text_score": 0.0,
-        "Rec.rec_batch_num": 16,
-        "EngineConfig.onnxruntime.intra_op_num_threads": min(4, os.cpu_count() or 2),
-        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
-    }
-
-
-def asset_path(*parts: str) -> Path:
-    """Return an on-disk asset path in source and frozen one-folder builds."""
+def asset_path(*parts):
     return Path(str(files("pdf2ai.assets").joinpath(*parts)))
 
 
-def required_assets() -> tuple[Path, ...]:
-    return (
-        asset_path("models", "ch_PP-OCRv5_rec_server.onnx"),
-        asset_path("models", "arabic_PP-OCRv5_rec_mobile.onnx"),
-        asset_path("models", "arabic_PP-OCRv4_rec_mobile.onnx"),
-        asset_path("fonts", "NotoSansArabic.ttf"),
-        asset_path("models", "PP-OCRv6_rec_tiny.onnx"),
-    )
+def required_assets():
+    return tuple(asset_path("models", name) for name in (
+        "PP-OCRv6_rec_tiny.onnx", "arabic_PP-OCRv5_rec_mobile.onnx",
+        "arabic_PP-OCRv4_rec_mobile.onnx",
+    )) + (asset_path("fonts", "NotoSansArabic.ttf"), asset_path("models", "PP-OCRv6_det_tiny.onnx"))
 
 
-def _make_recognizer(model: Path, language, model_type, ocr_version):
-    """Create a RapidOCR recognizer around one bundled PaddleOCR model."""
+def runtime_params():
+    return {
+        "Global.log_level": "critical", "Global.text_score": 0.0,
+        "Rec.rec_batch_num": 6,
+        "EngineConfig.onnxruntime.intra_op_num_threads": min(4, os.cpu_count() or 2),
+        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        "EngineConfig.onnxruntime.enable_cpu_mem_arena": True,
+    }
+
+
+def _make_recognizer(model, language, model_type, ocr_version):
     from rapidocr.ch_ppocr_rec import TextRecognizer
     from rapidocr.main import DEFAULT_CFG_PATH
     from rapidocr.utils.parse_parameters import ParseParams
-    cfg = ParseParams.load(DEFAULT_CFG_PATH)
-    cfg = ParseParams.update_batch(
-        cfg,
-        {
-            **runtime_params(),
-            "Rec.model_path": str(model),
-            "Rec.ocr_version": ocr_version,
-            "Rec.lang_type": language,
-            "Rec.model_type": model_type,
-        },
-    )
+    cfg = ParseParams.update_batch(ParseParams.load(DEFAULT_CFG_PATH), {
+        **runtime_params(), "Rec.model_path": str(model),
+        "Rec.lang_type": language, "Rec.model_type": model_type,
+        "Rec.ocr_version": ocr_version,
+    })
     cfg.Rec.engine_cfg = cfg.EngineConfig[cfg.Rec.engine_type.value]
     cfg.Rec.font_path = None
     cfg.Rec.model_root_dir = model.parent
     return TextRecognizer(cfg.Rec)
 
 
-def initialize() -> None:
-    """Load all local inference sessions exactly once in this worker process."""
-    global _ENGINE, _HANDWRITING, _ARABIC, _ARABIC_V4, _FONT
+def initialize():
+    global _ENGINE, _FONT
     if _ENGINE is not None:
         return
     with _LOCK:
         if _ENGINE is not None:
             return
-        missing = [path.name for path in required_assets() if not path.is_file()]
-        if missing:
-            raise FileNotFoundError("Missing bundled OCR assets: " + ", ".join(missing))
-
-        from rapidocr import RapidOCR
-        from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
+        if any(not p.is_file() for p in required_assets()):
+            raise FileNotFoundError("Missing bundled OCR assets")
+        import cv2
         import pymupdf
-
-        rapid_logger = logging.getLogger("RapidOCR")
-        rapid_logger.handlers.clear()
-        rapid_logger.propagate = False
-        rapid_logger.setLevel(logging.CRITICAL)
-
-        engine = RapidOCR(params={**runtime_params(), "Rec.model_path": str(required_assets()[4]), "Rec.model_type": ModelType.TINY})
-        _ARABIC = _make_recognizer(
-            required_assets()[1],
-            LangRec.ARABIC,
-            ModelType.MOBILE,
-            OCRVersion.PPOCRV5,
-        )
-        # PP-OCRv4's Arabic ONNX model emits logical-order text. Marking the
-        # recognizer as English prevents RapidOCR from reversing it for display.
+        from rapidocr import RapidOCR
+        from rapidocr.utils.typings import ModelType
+        cv2.setNumThreads(1)
+        logger = logging.getLogger("RapidOCR")
+        logger.handlers.clear()
+        logger.propagate = False
         _FONT = pymupdf.Font(fontfile=str(required_assets()[3]))
-        _ENGINE = engine
+        _ENGINE = RapidOCR(params={**runtime_params(),
+            "Det.model_path": str(required_assets()[4]), "Det.model_type": ModelType.TINY,
+            "Rec.model_path": str(required_assets()[0]), "Rec.model_type": ModelType.TINY})
 
 
-def fallback_recognizer(arabic=False):
-    global _HANDWRITING, _ARABIC_V4
+def recognizer(kind):
+    global _SMALL, _ARABIC, _ARABIC_V4
     from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
-    if arabic:
+    if kind == "arabic":
+        if _ARABIC is None:
+            _ARABIC = _make_recognizer(required_assets()[1], LangRec.ARABIC, ModelType.MOBILE, OCRVersion.PPOCRV5)
+        return _ARABIC
+    if kind == "arabic_retry":
         if _ARABIC_V4 is None:
+            # v4 emits logical order; disable RapidOCR's display reversal.
             _ARABIC_V4 = _make_recognizer(required_assets()[2], LangRec.EN, ModelType.MOBILE, OCRVersion.PPOCRV4)
         return _ARABIC_V4
-    if _HANDWRITING is None:
-        _HANDWRITING = _make_recognizer(required_assets()[0], LangRec.CH, ModelType.SERVER, OCRVersion.PPOCRV5)
-    return _HANDWRITING
+    if _SMALL is None:
+        import rapidocr
+        _SMALL = _make_recognizer(Path(rapidocr.__file__).parent / "models" / "PP-OCRv6_rec_small.onnx",
+                                 LangRec.CH, ModelType.SMALL, OCRVersion.PPOCRV6)
+    return _SMALL
 
 
-def _arabic_ratio(text: str) -> tuple[int, float]:
-    letters = [char for char in text if char.isalpha()]
-    arabic = sum(
-        "\u0600" <= char <= "\u06ff"
-        or "\u0750" <= char <= "\u077f"
-        or "\u08a0" <= char <= "\u08ff"
-        for char in letters
-    )
-    return arabic, arabic / max(1, len(letters))
+def _arabic_ratio(text):
+    letters = [c for c in text if c.isalpha()]
+    count = sum("\u0600" <= c <= "\u06ff" or "\u0750" <= c <= "\u077f" or "\u08a0" <= c <= "\u08ff" for c in letters)
+    return count, count / max(1, len(letters))
 
 
-def _select(primary, handwriting, arabic, arabic_v4):
-    """Choose one recognition per detected line without duplicating content."""
-    texts = []
-    scores = []
-    results = (primary, handwriting, arabic, arabic_v4)
-    for index in range(len(primary.txts)):
-        candidates = tuple(
-            (result.txts[index], result.scores[index])
-            for result in results
-            if result.txts is not None
-            and result.scores is not None
-            and index < len(result.txts)
-            and index < len(result.scores)
-        )
-        arabic_candidates = []
-        for result in (arabic, arabic_v4):
-            if (
-                result.txts is None
-                or result.scores is None
-                or index >= len(result.txts)
-                or index >= len(result.scores)
-            ):
-                continue
-            text, score = result.txts[index], result.scores[index]
-            count, share = _arabic_ratio(text)
-            if count >= 2 and share >= 0.30 and score >= 0.45:
-                arabic_candidates.append((text, score))
-        if arabic_candidates:
-            chosen = max(arabic_candidates, key=lambda item: item[1])
-            # PyMuPDF's positioned text extraction applies RTL ordering to the
-            # inserted OCR layer. Store display order so the extracted Markdown
-            # receives logical Unicode order rather than reversed Arabic words.
-            from bidi.algorithm import get_display
-
-            chosen = (get_display(chosen[0]), chosen[1])
-        else:
-            chosen = max(candidates, key=lambda item: item[1])
-        texts.append(chosen[0])
-        scores.append(float(chosen[1]))
-    return tuple(texts), tuple(scores)
+def is_arabic(text, score):
+    count, share = _arabic_ratio(text)
+    return count >= 2 and share >= .3 and score >= .45
 
 
-def full_ocr(image: np.ndarray):
-    """Return PyMuPDF4LLM's expected ``(box, text, score)`` tuples."""
-    global LAST_LOW_CONFIDENCE, _SMALL
+def language_probes(boxes, width):
+    """Sample top/middle/bottom on BOTH sides, even for confident English.
+
+    Detect the English-left/Arabic-right case without recognizing every English
+    line twice. Original box coordinates remain intact for Layout.
+    """
+    groups = [[], []]
+    for i, box in enumerate(boxes):
+        groups[int(float(np.mean(box[:, 0])) >= width / 2)].append(i)
+    probes = set()
+    for group in groups:
+        group.sort(key=lambda i: float(np.mean(boxes[i][:, 1])))
+        if group:
+            probes.update((group[0], group[len(group) // 2], group[-1]))
+    return groups, probes
+
+
+def full_ocr(image, progress=None):
+    global LAST_LOW_CONFIDENCE, LAST_METRICS
     initialize()
     from rapidocr.ch_ppocr_rec.typings import TextRecInput
     from rapidocr.main import RapidOCRError
+    from rapidocr.utils.process_img import map_boxes_to_original
+    LAST_METRICS = {}
+    LAST_LOW_CONFIDENCE = False
+
+    def stage(name, function):
+        if progress:
+            progress(name)
+        started = time.monotonic()
+        result = function()
+        LAST_METRICS[name] = round(time.monotonic() - started, 3)
+        return result
 
     original = _ENGINE.load_img(image)
     processed, operations = _ENGINE.preprocess_img(original)
     try:
-        crops, detection = _ENGINE.detect_and_crop(processed, operations)
-        rotated, classification = _ENGINE.cls_and_rotate(crops)
-        request = TextRecInput(img=rotated, return_word_box=False)
-        primary = _ENGINE.text_rec(request)
+        crops, detection = stage("Finding printed text", lambda: _ENGINE.detect_and_crop(processed, operations))
     except RapidOCRError:
         return []
-
-    from rapidocr.ch_ppocr_rec.typings import TextRecOutput
-    count = len(primary.txts or ())
-    # The orientation classifier can flip an otherwise healthy printed line.
-    # Try the opposite orientation cheaply before loading larger recognizers.
-    indices = [i for i in range(count) if primary.scores[i] < .85]
-    if indices:
-        flipped = [np.ascontiguousarray(np.rot90(rotated[i], 2)) for i in indices]
-        retry = _ENGINE.text_rec(TextRecInput(img=flipped, return_word_box=False))
-        texts, scores = list(primary.txts), list(primary.scores)
-        for i, crop, text, score in zip(indices, flipped, retry.txts or (), retry.scores):
-            if score > scores[i]:
-                rotated[i] = crop
-                texts[i], scores[i] = text, score
-        primary.txts, primary.scores = tuple(texts), tuple(scores)
-    # Retry uncertain tiny-model crops with the larger v6 recognizer. Confident
-    # printed text completes after one recognition pass.
-    indices = [i for i in range(count) if primary.scores[i] < .97]
-    if indices:
-        if _SMALL is None:
-            import rapidocr
-            from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
-            _SMALL = _make_recognizer(Path(rapidocr.__file__).parent / "models" / "PP-OCRv6_rec_small.onnx", LangRec.CH, ModelType.SMALL, OCRVersion.PPOCRV6)
-        retry = _SMALL(TextRecInput(img=[rotated[i] for i in indices], return_word_box=False))
-        texts, scores = list(primary.txts), list(primary.scores)
-        for i, text, score in zip(indices, retry.txts or (), retry.scores):
-            if score > scores[i]:
-                texts[i], scores[i] = text, score
-        primary.txts, primary.scores = tuple(texts), tuple(scores)
-    arabic = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
-    indices = [i for i in range(count) if primary.scores[i] < .97 or
-               any(c.isalpha() and ord(c) > 591 for c in primary.txts[i])]
-    if indices:
-        retry = _ARABIC(TextRecInput(img=[rotated[i] for i in indices], return_word_box=False))
-        texts, scores = list(arabic.txts), list(arabic.scores)
-        for i, text, score in zip(indices, retry.txts or (), retry.scores):
-            texts[i], scores[i] = text, score
-        arabic.txts, arabic.scores = tuple(texts), scores
-    handwriting = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
-    arabic_v4 = TextRecOutput(txts=tuple("" for _ in range(count)), scores=[0.0] * count)
-    arabic_lines = {
-        i for i, (text, score) in enumerate(zip(arabic.txts or (), arabic.scores))
-        if _arabic_ratio(text)[0] >= 2 and _arabic_ratio(text)[1] >= .3 and score >= .45
-    }
-    # Route uncertain/non-Latin text to Arabic; reserve the heavy handwriting
-    # recognizer for lines still uncertain after the two v6 passes.
-    for is_arabic, target in ((False, handwriting), (True, arabic_v4)):
-        if is_arabic:
-            indices = [i for i in arabic_lines if arabic.scores[i] < .90]
-        else:
-            indices = [i for i in range(count) if i not in arabic_lines and primary.scores[i] < .97]
-        if indices:
-            retry = fallback_recognizer(is_arabic)(TextRecInput(img=[rotated[i] for i in indices], return_word_box=False))
-            texts, scores = list(target.txts), list(target.scores)
-            for i, text, score in zip(indices, retry.txts or (), retry.scores):
-                texts[i], scores[i] = text, score
-            target.txts, target.scores = tuple(texts), scores
-    primary.txts, primary.scores = _select(primary, handwriting, arabic, arabic_v4)
-    LAST_LOW_CONFIDENCE = any(score < .80 for score in primary.scores)
-    result = _ENGINE.build_final_output(
-        original, detection, classification, primary, crops, operations
-    )
-    if result.boxes is None or result.txts is None or result.scores is None:
+    # Avoid the classifier's false per-line flips. Retry orientation only where
+    # recognition is uncertain, preserving normal upright printed lines.
+    primary = stage("Reading printed text", lambda: _ENGINE.text_rec(TextRecInput(img=crops, return_word_box=False)))
+    texts, scores = list(primary.txts or ()), list(primary.scores)
+    if not texts:
         return []
-    return list(zip(result.boxes, result.txts, result.scores))
+    count = len(texts)
+
+    def recognize_indices(kind, indices):
+        if not indices:
+            return {}
+        result = stage("Checking " + kind.replace("_", " "), lambda: recognizer(kind)(
+            TextRecInput(img=[crops[i] for i in indices], return_word_box=False)))
+        return {i: (t, float(s)) for i, t, s in zip(indices, result.txts or (), result.scores)}
+
+    groups, probes = language_probes(detection.boxes, processed.shape[1])
+    uncertain = {i for i in range(count) if scores[i] < .85 or
+                 any(c.isalpha() and ord(c) > 591 for c in texts[i])}
+    arabic = recognize_indices("arabic", sorted(probes | uncertain))
+    arabic_regions = [group for group in groups if any(
+        i in arabic and is_arabic(*arabic[i]) for i in group)]
+    extra = {i for group in arabic_regions for i in group} - arabic.keys()
+    arabic.update(recognize_indices("arabic", sorted(extra)))
+    arabic_lines = {i for i, candidate in arabic.items() if is_arabic(*candidate)}
+
+    upside_down = [i for i in range(count) if scores[i] < .80 and i not in arabic_lines]
+    if upside_down:
+        flipped = [np.ascontiguousarray(np.rot90(crops[i], 2)) for i in upside_down]
+        retry = stage("Checking text orientation", lambda: _ENGINE.text_rec(TextRecInput(img=flipped, return_word_box=False)))
+        for i, crop, text, score in zip(upside_down, flipped, retry.txts or (), retry.scores):
+            if score > scores[i]:
+                crops[i], texts[i], scores[i] = crop, text, float(score)
+    # A single small printed-text retry replaces the 81 MB handwriting model.
+    low = [i for i in range(count) if scores[i] < .85 and i not in arabic_lines]
+    for i, (text, score) in recognize_indices("printed_text", low).items():
+        if score > scores[i]:
+            texts[i], scores[i] = text, score
+    low_arabic = [i for i in arabic_lines if arabic[i][1] < .80]
+    for i, candidate in recognize_indices("arabic_retry", low_arabic).items():
+        if is_arabic(*candidate) and candidate[1] > arabic[i][1]:
+            arabic[i] = candidate
+    from bidi.algorithm import get_display
+    for i in arabic_lines:
+        # PyMuPDF reorders the positioned PDF text layer during extraction.
+        texts[i], scores[i] = get_display(arabic[i][0]), arabic[i][1]
+    LAST_LOW_CONFIDENCE = any(s < .80 for s in scores)
+    LAST_METRICS["lines"] = count
+    LAST_METRICS["printed_retries"] = len(low)
+    LAST_METRICS["arabic_lines"] = len(arabic_lines)
+    boxes = map_boxes_to_original(detection.boxes.copy(), operations, original.shape[0], original.shape[1])
+    return list(zip(boxes, texts, scores))
 
 
-def smoke_test() -> None:
-    """Exercise every bundled ONNX session without reading a user document."""
+def smoke_test():
     initialize()
     from rapidocr.ch_ppocr_rec.typings import TextRecInput
-
-    blank_page = np.full((64, 128, 3), 255, dtype=np.uint8)
-    blank_line = np.full((48, 160, 3), 255, dtype=np.uint8)
-    _ENGINE.text_det(blank_page)
-    _ENGINE.text_cls([blank_line])
-    request = TextRecInput(img=[blank_line], return_word_box=False)
-    for recognizer in (_ENGINE.text_rec, _ARABIC):
-        recognizer(request)
-    if not _FONT.has_glyph(ord("A")) or not _FONT.has_glyph(ord("ه")):
-        raise RuntimeError("Bundled OCR font lacks required glyphs")
+    _ENGINE.text_det(np.full((64, 128, 3), 255, dtype=np.uint8))
+    request = TextRecInput(img=[np.full((48, 160, 3), 255, dtype=np.uint8)], return_word_box=False)
+    _ENGINE.text_rec(request)
+    recognizer("arabic")(request)
+    if not _FONT.has_glyph(ord("ه")):
+        raise RuntimeError("Bundled font lacks Arabic glyphs")
 
 
-def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False):
-    """PyMuPDF4LLM OCR callback using its official full-OCR integration."""
+def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False, progress=None):
     initialize()
-    from pymupdf4llm.ocr import exec_ocr_interface
-
-    # The adapter's built-in CJK fallback has no Arabic glyphs. Use the
-    # bundled Noto font so the invisible OCR text layer retains Unicode Arabic.
-    exec_ocr_interface.FONT = _FONT
-    return exec_ocr_interface.exec_ocr_full(
-        page,
-        full_ocr,
-        dpi=dpi,
-        language=language,
-        keep_ocr_text=keep_ocr_text,
-    )
+    import pymupdf
+    from pymupdf4llm.ocr.exec_ocr_interface import ocr_text
+    from pymupdf4llm.ocr.get_culled_pixmap import get_pixmap
+    healthy, replace = [], []
+    for block in page.get_text("dict", flags=pymupdf.TEXT_ACCURATE_BBOXES)["blocks"]:
+        for line in block.get("lines", ()):
+            for span in line["spans"]:
+                if ocr_text(span):
+                    if keep_ocr_text:
+                        return
+                    replace.append(span["bbox"])
+                elif "\ufffd" in span["text"]:
+                    replace.append(span["bbox"])
+                else:
+                    healthy.append(span["bbox"])
+    # Photographs sometimes have pixel dimensions stored as PDF points. Never
+    # expand a 2000px photo into an 8333px raster just because its page is huge.
+    dpi = max(36, min(int(dpi), int(72 * 3000 / max(page.rect.width, page.rect.height))))
+    pix, empty = get_pixmap(page.get_displaylist(), dpi=dpi, rects=healthy, empty_threshold=250)
+    if empty:
+        return
+    image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+    result = full_ocr(image, progress)
+    matrix = pymupdf.Rect(pix.irect).torect(page.rect)
+    for rect in replace:
+        page.add_redact_annot(rect)
+    if replace:
+        page.apply_redactions(images=0, graphics=0)
+    page.insert_font(fontname="pdf2aiocr", fontbuffer=_FONT.buffer)
+    for box, text, score in result:
+        if not text.strip():
+            continue
+        rect = pymupdf.Rect(float(np.min(box[:, 0])), float(np.min(box[:, 1])),
+                           float(np.max(box[:, 0])), float(np.max(box[:, 1]))) * matrix
+        # The official adapter assumes a font with near-unit line height.
+        # Noto Arabic's ascender/descender span >2 em: using box height as font
+        # size makes adjacent OCR lines overlap and destroys table columns.
+        size = rect.height / (_FONT.ascender - _FONT.descender)
+        origin = pymupdf.Point(rect.x0, rect.y0 + size * _FONT.ascender)
+        width = _FONT.text_length(text, fontsize=size)
+        if width > 0:
+            page.insert_text(origin, text, fontsize=size, fontname="pdf2aiocr", render_mode=3,
+                             morph=(origin, pymupdf.Matrix(rect.width / width, 1)))

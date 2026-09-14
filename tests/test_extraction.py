@@ -189,3 +189,73 @@ def test_ocr_missing_model_report(monkeypatch):
     result = check_ocr()
     assert not result["available"]
     assert "models are missing" in result["detail"]
+
+
+def test_printed_bilingual_columns(tmp_path, ocr_state, qtbot):
+    from PySide6.QtGui import QFont, QFontDatabase, QImage, QPainter, QColor
+    from PySide6.QtCore import QRect, Qt
+    from pdf2ai.extraction.multilingual_ocr import asset_path
+    image = QImage(2480, 3508, QImage.Format_RGB888)
+    image.fill(QColor("white"))
+    painter = QPainter(image)
+    painter.setPen(QColor("black"))
+    font = QFont("Arial")
+    font.setPixelSize(34)
+    painter.setFont(font)
+    for row in range(12):
+        painter.drawText(QRect(100, 180 + row * 100, 1080, 90), Qt.AlignLeft,
+                         f"Clause {row + 1}: Flood damage is excluded.")
+    font_id = QFontDatabase.addApplicationFont(str(asset_path("fonts", "NotoSansArabic.ttf")))
+    font = QFont(QFontDatabase.applicationFontFamilies(font_id)[0])
+    font.setPixelSize(34)
+    painter.setFont(font)
+    arabic = "هذه وثيقة تأمين ويجب مراجعة الشروط"
+    for row in range(12):
+        painter.drawText(QRect(1350, 180 + row * 100, 1000, 90), Qt.AlignRight, arabic)
+    painter.end()
+    raster = tmp_path / "columns.png"
+    image.save(str(raster))
+    source = tmp_path / "columns.pdf"
+    with pymupdf.open() as document:
+        page = document.new_page(width=620, height=877)
+        page.insert_image(page.rect, filename=raster)
+        document.save(source)
+    result = convert_pdf(source, ocr_state)
+    output = Path(result["output"]).read_text(encoding="utf-8")
+    assert output.count("Flood damage is excluded") == 12
+    assert output.count(arabic) == 12
+    assert "Clause 1:" in output and "Clause 12:" in output
+    assert result["timings"][0]["ocr"]["arabic_lines"] == 12
+
+
+def test_ocr_boxes_match_detected_lines(tmp_path, ocr_state, monkeypatch):
+    """Arabic-capable font metrics must not expand OCR boxes across rows."""
+    import numpy as np
+    from pdf2ai.extraction import multilingual_ocr as ocr
+    monkeypatch.setattr(ocr, 'full_ocr', lambda image, progress: [
+        (np.array([[40,40],[240,40],[240,60],[40,60]]), 'First row', .99),
+        (np.array([[40,70],[240,70],[240,90],[40,90]]), 'Second row', .99),
+    ])
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=300, height=200)
+        page.draw_rect((20,20,280,180), color=(0,0,0))
+        ocr.exec_ocr(page, dpi=72)
+        spans = [s for b in page.get_text('dict')['blocks'] for line in b.get('lines',[]) for s in line['spans']]
+        assert len(spans) == 2
+        assert spans[0]['bbox'][3] <= 60.1
+        assert spans[1]['bbox'][1] >= 69.9
+
+
+def test_photo_sized_page_is_not_skipped(tmp_path, ocr_state):
+    path = tmp_path/'photo.pdf'
+    with pymupdf.open() as original:
+        p = original.new_page(width=600,height=800)
+        p.insert_text((60,130), 'CERTIFICATE OF REGISTRATION',fontsize=22)
+        p.insert_text((60,180), 'Printed document with readable text.',fontsize=18)
+        image = p.get_pixmap(dpi=144).tobytes('png')
+    with pymupdf.open() as doc:
+        p = doc.new_page(width=1500,height=2000)
+        p.insert_image(p.rect,stream=image)
+        doc.save(path)
+    result = convert_pdf(path,ocr_state)
+    assert 'CERTIFICATE OF REGISTRATION' in Path(result['output']).read_text()

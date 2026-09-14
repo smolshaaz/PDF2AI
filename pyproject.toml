@@ -13,11 +13,13 @@ dependencies = [
   "rapidocr==3.9.2",
   "onnxruntime==1.29.0",
   "python-bidi==0.6.7",
+  "markdown-it-py==4.0.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest==9.1.1", "pytest-qt==4.5.0"]
 build = ["pyinstaller==6.22.2"]
+web = ["fastapi==0.141.1", "uvicorn==0.52.4"]
 
 [project.gui-scripts]
 pdf2ai = "pdf2ai.main:main"
@@ -26,7 +28,7 @@ pdf2ai = "pdf2ai.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-pdf2ai = ["assets/SOURCES.md", "assets/fonts/*", "assets/models/*"]
+pdf2ai = ["assets/SOURCES.md", "assets/fonts/*", "assets/models/*", "web/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

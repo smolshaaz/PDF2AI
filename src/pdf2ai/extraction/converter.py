@@ -30,7 +30,7 @@ def check_ocr(lightweight=False) -> dict:
         onnxruntime.disable_telemetry_events()
         import rapidocr
         models = Path(rapidocr.__file__).parent / "models"
-        required = ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx", "ch_ppocr_mobile_v2.0_cls_mobile.onnx")
+        required = ("PP-OCRv6_rec_small.onnx", "ch_ppocr_mobile_v2.0_cls_mobile.onnx")
         missing = [name for name in required if not (models / name).is_file()]
         if missing:
             return {"available": False, "detail": "Bundled OCR models are missing. Reinstall PDF2AI. Missing: " + ", ".join(missing)}
@@ -44,7 +44,7 @@ def check_ocr(lightweight=False) -> dict:
             multilingual_ocr.smoke_test()
         return {
             "available": True,
-            "detail": "RapidOCR 3.9.2 / ONNX Runtime; batched PP-OCRv6 with selective handwriting/Arabic retries",
+            "detail": "Printed-document OCR: PP-OCRv6 / ONNX Runtime, bilingual column probes; no handwriting model",
         }
     except Exception as exc:
         # Exception strings from OCR may include recognized content. Never log them.
@@ -117,15 +117,26 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
                 progress(done, count, stage, time.monotonic() - started)
         chunks = []
         uncertain = []
+        page_timings = []
         # Modern Layout analyzes individual pages. Keep the same document open
         # and retain only Markdown/metadata, releasing image/layout data per page.
         for page_number in range(count):
+            page_started = time.monotonic()
             report(page_number, "Reading page")
             multilingual_ocr.LAST_LOW_CONFIDENCE = False
+            multilingual_ocr.LAST_METRICS = {}
+            page = doc[page_number]
+            scanned = not page.get_text().strip() and bool(page.get_images())
+            options["use_ocr"] = state["available"]
+            if scanned and state["available"]:
+                report(page_number, "Recognizing scanned page")
+                multilingual_ocr.exec_ocr(page, progress=lambda stage: report(page_number, stage))
+                options["use_ocr"] = False
             if state["available"]:
                 def recognize(*args, **kwargs):
                     report(page_number, "Recognizing scanned text")
-                    return multilingual_ocr.exec_ocr(*args, **kwargs)
+                    return multilingual_ocr.exec_ocr(*args, **kwargs,
+                        progress=lambda stage: report(page_number, stage))
                 options["ocr_function"] = recognize
             page_chunks = pymupdf4llm.to_markdown(doc, pages=[page_number], **options)
             if not isinstance(page_chunks, list):
@@ -133,6 +144,9 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
             chunks.extend({"metadata": c["metadata"], "text": c["text"]} for c in page_chunks)
             if multilingual_ocr.LAST_LOW_CONFIDENCE:
                 uncertain.append(page_number + 1)
+            page_timings.append({"page": page_number + 1,
+                "seconds": round(time.monotonic() - page_started, 3),
+                "ocr": dict(multilingual_ocr.LAST_METRICS)})
             report(page_number + 1, "Page complete")
     if not isinstance(chunks, list):
         raise PDFError("The extraction engine returned an unexpected format. Reinstall PDF2AI.")
@@ -156,4 +170,4 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
         if temp is not None:
             temp.unlink(missing_ok=True)
     return {"ok": True, "output": str(output), "pages": count, "warnings": warnings,
-            "seconds": round(time.monotonic() - started, 2)}
+            "seconds": round(time.monotonic() - started, 2), "timings": page_timings}
