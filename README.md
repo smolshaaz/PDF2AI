@@ -238,3 +238,15 @@ save error rather than risk overwriting output.
 
 See `THIRD_PARTY_NOTICES.md` for dependency licenses and official API references.
 See `BUILD_VALIDATION.md` for the checks actually run and platform limitations.
+
+## Web Deployment & Client-Side Privacy
+
+PDF2AI is also deployable directly on the web (e.g., via GitHub Pages or local static hosting):
+
+- **Zero Host Transmission**: All document reading, layout extraction, OCR (via Scribe.js / WebAssembly), and Markdown compilation run strictly inside the user's browser on their client device.
+- **Device-Only Output**: The generated `.ai.md` files are created entirely in client memory and downloaded straight to the user's device. No documents or outputs are ever uploaded to, processed on, or stored on the hosting device/server.
+- **Deployment**: An automated GitHub Actions workflow (`.github/workflows/deploy-web.yml`) builds and publishes `web-local/dist` to GitHub Pages upon push. To serve locally:
+  ```bash
+  python -m pdf2ai.web
+  ```
+

@@ -28,7 +28,7 @@ pdf2ai = "pdf2ai.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-pdf2ai = ["assets/SOURCES.md", "assets/fonts/*", "assets/models/*", "web/*.html"]
+pdf2ai = ["assets/SOURCES.md", "assets/fonts/*", "assets/models/*", "web/*.html", "web/dist/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
