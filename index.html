@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Convert PDFs to clean Markdown privately in your browser." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial' font-weight='700' font-size='18' fill='white'%3EP%3C/text%3E%3C/svg%3E" />
+    <title>PDF2AI</title>
+    <script type="module" crossorigin src="./assets/index-CRS2Ogx8.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-CE2MFoCh.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="titlebar">
+        <div class="brand-mark" aria-hidden="true">P</div>
+        <div>
+          <h1>PDF2AI</h1>
+          <p>PDF to Markdown</p>
+        </div>
+        <div class="privacy-pill"><span></span> Runs on this device</div>
+      </header>
+
+      <section id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Choose PDF files">
+        <div class="file-icon" aria-hidden="true">PDF</div>
+        <div class="drop-copy">
+          <strong>Drop PDF files anywhere here</strong>
+          <span>or choose files from this device</span>
+        </div>
+        <button id="chooseButton" class="secondary-button" type="button">Choose PDFs</button>
+        <input id="fileInput" type="file" accept="application/pdf,.pdf" multiple hidden />
+      </section>
+
+      <div class="queue-head">
+        <div>
+          <h2>Files</h2>
+          <span id="queueSummary">No PDFs queued</span>
+        </div>
+        <div class="queue-actions">
+          <button id="removeButton" type="button" disabled>Remove selected</button>
+          <button id="clearButton" type="button" disabled>Clear</button>
+        </div>
+      </div>
+
+      <section class="queue-panel" aria-label="PDF queue">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 38px;"><input id="selectAllCheckbox" type="checkbox" aria-label="Select all" /></th>
+              <th>File</th>
+              <th style="width: 65px; text-align: center;">Pages</th>
+              <th style="width: 140px;">Status</th>
+              <th style="width: 140px; text-align: right;">Action</th>
+            </tr>
+          </thead>
+          <tbody id="queueBody"></tbody>
+        </table>
+        <div id="emptyQueue" class="empty-queue">PDFs you add will appear here.</div>
+      </section>
+
+      <section id="workPanel" class="work-panel" hidden>
+        <div class="work-line">
+          <div><strong id="workTitle">Preparing…</strong><span id="workStage"></span></div>
+          <span id="workPercent">0%</span>
+        </div>
+        <progress id="progressBar" value="0" max="100"></progress>
+        <div class="work-footer">
+          <span id="timeLabel"></span>
+          <button id="stopButton" type="button">Stop</button>
+        </div>
+      </section>
+
+      <section id="resultPanel" class="result-panel" hidden aria-live="polite">
+        <div class="result-icon">✓</div>
+        <div class="result-info">
+          <strong id="resultTitle"></strong>
+          <span id="resultNote"></span>
+        </div>
+        <div class="result-actions">
+          <button id="resultViewButton" class="result-view-btn" type="button">👁️ View Output</button>
+          <button id="resultDownloadButton" class="result-download-btn" type="button">⬇️ Download</button>
+        </div>
+      </section>
+
+      <div class="action-bar">
+        <button id="convertButton" class="convert-button" type="button" disabled>Convert</button>
+        <button id="viewOutputButton" class="view-output-button" type="button" disabled>👁️ View Output</button>
+      </div>
+
+      <details class="details-panel">
+        <summary>Details</summary>
+        <div class="details-content">
+          <div class="privacy-copy">
+            <strong>Your documents stay on this device.</strong>
+            <span>The browser reads the PDF, performs OCR, builds the preview, and creates the download locally. PDF2AI has no upload endpoint.</span>
+          </div>
+          <pre id="detailsLog">Ready.</pre>
+          <button id="copyDetails" type="button">Copy details</button>
+        </div>
+      </details>
+    </main>
+
+    <dialog id="viewer">
+      <div class="viewer-shell">
+        <header class="viewer-head">
+          <div><strong id="viewerName"></strong><span id="viewerMeta"></span></div>
+          <button id="closeViewer" class="icon-button" aria-label="Close preview">×</button>
+        </header>
+        <div class="viewer-toolbar">
+          <div class="tabs" role="tablist">
+            <button id="previewTab" class="active" role="tab">Preview</button>
+            <button id="sourceTab" role="tab">Markdown</button>
+          </div>
+          <div class="viewer-actions">
+            <button id="printButton" type="button">Print / PDF</button>
+            <button id="downloadButton" class="primary-small" type="button">Download .ai.md</button>
+          </div>
+        </div>
+        <div id="previewPane" class="preview-pane markdown-body"></div>
+        <textarea id="sourcePane" class="source-pane" readonly hidden></textarea>
+      </div>
+    </dialog>
+  </body>
+</html>
