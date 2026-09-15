@@ -1,5 +1,23 @@
 """Structural checks only; these do not assert extraction accuracy."""
 import re
+import html
+import unicodedata
+from collections import Counter
+
+
+def missing_token_count(source_text: str, markdown: str) -> int:
+    """Flag possible loss between the working text layer and Markdown.
+
+    Counts repeated words and numbers. This cannot validate OCR accuracy or
+    field/value associations. Formatting changes can produce false positives;
+    only a review warning is generated, never a rewritten document.
+    """
+    def tokens(text):
+        text = html.unescape(re.sub(r'<[^>]*>', ' ', text))
+        text = unicodedata.normalize('NFKC', text).casefold()
+        return Counter(word for word in re.findall(r'[^\W_]+', text)
+                       if len(word) >= 3 or any(c.isdigit() for c in word))
+    return sum((tokens(source_text) - tokens(markdown)).values())
 
 
 def inspect_chunks(chunks: list[dict], page_count: int) -> tuple[list[dict], list[str]]:

@@ -1,4 +1,5 @@
 from pathlib import Path
+from pdf2ai import __version__
 import logging
 from PySide6.QtCore import Qt, QUrl, QTimer, QSettings, QStandardPaths
 from PySide6.QtGui import QDesktopServices, QColor
@@ -32,7 +33,7 @@ class MainWindow(QMainWindow):
         self.successes = 0
         self.failures = 0
         self._forced_output_dir = Path(output_dir) if output_dir is not None else None
-        self.setWindowTitle("PDF2AI")
+        self.setWindowTitle(f"PDF2AI · {__version__}")
         self.resize(740, 680)
         self.setMinimumSize(580, 560)
         self.setAcceptDrops(True)
@@ -140,6 +141,11 @@ class MainWindow(QMainWindow):
         self.details.hide()
         self.details_button.toggled.connect(self.details.setVisible)
         layout.addWidget(self.details)
+        self.logs_button = QPushButton("Open session logs")
+        self.logs_button.hide()
+        self.logs_button.clicked.connect(self.open_session_logs)
+        self.details_button.toggled.connect(self.logs_button.setVisible)
+        layout.addWidget(self.logs_button)
         self.setStyleSheet('''
             QWidget { font-family: "Segoe UI", "Helvetica Neue", sans-serif; font-size: 13px; color: #243143; }
             QMainWindow, QWidget#centralwidget { background: #f7f8fa; }
@@ -360,6 +366,15 @@ class MainWindow(QMainWindow):
                 self.active_row = None
                 self.failures += 1
             self.ocr_notice.setText("Local processing encountered an error. See Details.")
+
+    def open_session_logs(self):
+        for handler in self.logger.handlers:
+            filename = getattr(handler, "baseFilename", None)
+            if filename:
+                handler.flush()
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(filename).parent)))
+                return
+        self.add_detail("Session log files are unavailable because the log folder could not be opened.")
 
     def add_detail(self, text):
         self.details.appendPlainText(text)

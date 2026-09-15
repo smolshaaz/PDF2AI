@@ -7,7 +7,7 @@ from pdf2ai.extraction.converter import convert_pdf, PDFError
 pytestmark = pytest.mark.integration
 
 
-def test_uncertain_ocr_is_marked_and_flagged(tmp_path, ocr_state, monkeypatch):
+def test_uncertain_ocr_is_preserved_and_flagged(tmp_path, ocr_state, monkeypatch):
     import numpy as np
     from pdf2ai.extraction import multilingual_ocr as ocr
     from pymupdf4llm.ocr import OCRMode
@@ -36,11 +36,11 @@ def test_uncertain_ocr_is_marked_and_flagged(tmp_path, ocr_state, monkeypatch):
     monkeypatch.setattr(pymupdf4llm, 'to_markdown', capture)
     result = convert_pdf(path, ocr_state)
     text = Path(result['output']).read_text()
-    assert '[illegible]' in text
-    assert 'UNCERTAIN WATERMARK' not in text
+    assert '[illegible]' not in text
+    assert 'UNCERTAIN WATERMARK' in text
     assert 'POLICY LIMIT 5000' in text
     assert 'NATIVE TEXT' in text
-    assert result['timings'][0]['ocr']['illegible_regions'] == 1
+    assert result['timings'][0]['ocr']['uncertain_regions'] == 1
     assert any('review pages: 1' in warning for warning in result['warnings'])
     assert modes == [False, OCRMode.SELECT_DROP_OLD]
 

@@ -15,3 +15,9 @@ Both use the SIL Open Font License 1.1 included as `fonts/OFL.txt`.
 
 - `https://github.com/google/fonts/tree/main/ofl/notosansarabic`
 - `https://github.com/google/fonts/tree/main/ofl/caveat`
+
+`PP-OCRv6_rec_medium.onnx`: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx
+SHA-256: `eef444829dbbe18d7fea59a3f6eb75647518d2b3a9568d27c92e42940204894b` (RapidOCR 3.9.2 manifest, Apache-2.0).
+
+`en_PP-OCRv5_rec_mobile.onnx`: https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/en_PP-OCRv5_rec_mobile.onnx
+SHA-256: `c3461add59bb4323ecba96a492ab75e06dda42467c9e3d0c18db5d1d21924be8` (RapidOCR 3.9.2 manifest, Apache-2.0).

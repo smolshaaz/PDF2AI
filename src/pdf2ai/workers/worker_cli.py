@@ -78,6 +78,11 @@ def run_job(job_path) -> int:
                 except Exception:
                     pass
                 return 1
+            finally:
+                # Destruction order at interpreter exit differs across native
+                # OCR runtimes. Release sessions while their libraries are live.
+                from pdf2ai.extraction.multilingual_ocr import shutdown
+                shutdown()
 
 
 def main(argv=None) -> int:

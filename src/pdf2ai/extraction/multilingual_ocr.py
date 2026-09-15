@@ -1,21 +1,21 @@
 """Local printed-document OCR: fast recognition, targeted language/quality retries."""
 from importlib.resources import files
 import logging
+import atexit
 import os
+import re
 from pathlib import Path
 import threading
 import time
 import numpy as np
 
-_ENGINE = _SMALL = _ARABIC = _ARABIC_V4 = _FONT = None
+_ENGINE = _SMALL = _MEDIUM = _ARABIC = _ARABIC_V4 = _FONT = None
 _LOCK = threading.Lock()
 LAST_LOW_CONFIDENCE = False
 LAST_METRICS = {}
 
-# Applied only after language/orientation/recognition retries. This is a
-# presentation cutoff, not a calibrated measure of whether text is correct.
+# Review threshold only: a low score must never erase potentially real text.
 NOISE_FLOOR = 0.85
-ILLEGIBLE_MARKER = "[illegible]"
 
 
 def asset_path(*parts):
@@ -26,13 +26,15 @@ def required_assets():
     return tuple(asset_path("models", name) for name in (
         "PP-OCRv6_rec_tiny.onnx", "arabic_PP-OCRv5_rec_mobile.onnx",
         "arabic_PP-OCRv4_rec_mobile.onnx",
-    )) + (asset_path("fonts", "NotoSansArabic.ttf"), asset_path("models", "PP-OCRv6_det_tiny.onnx"))
+    )) + (asset_path("fonts", "NotoSansArabic.ttf"), asset_path("models", "PP-OCRv6_det_tiny.onnx"), asset_path("models", "PP-OCRv6_rec_medium.onnx"), asset_path("models", "en_PP-OCRv5_rec_mobile.onnx"))
 
 
 def runtime_params():
     return {
         "Global.log_level": "critical", "Global.text_score": 0.0,
         "Rec.rec_batch_num": 6,
+        # Detection uses a bounded image; recognition uses original pixels.
+        "Global.max_side_len": 2000,
         "EngineConfig.onnxruntime.intra_op_num_threads": min(4, os.cpu_count() or 2),
         "EngineConfig.onnxruntime.inter_op_num_threads": 1,
         "EngineConfig.onnxruntime.enable_cpu_mem_arena": True,
@@ -48,6 +50,8 @@ def _make_recognizer(model, language, model_type, ocr_version):
         "Rec.lang_type": language, "Rec.model_type": model_type,
         "Rec.ocr_version": ocr_version,
     })
+    if model_type.value == "medium":
+        cfg.Rec.rec_batch_num = 1  # Avoid padding short cells to the longest paragraph.
     cfg.Rec.engine_cfg = cfg.EngineConfig[cfg.Rec.engine_type.value]
     cfg.Rec.font_path = None
     cfg.Rec.model_root_dir = model.parent
@@ -66,7 +70,7 @@ def initialize():
         import cv2
         import pymupdf
         from rapidocr import RapidOCR
-        from rapidocr.utils.typings import ModelType
+        from rapidocr.utils.typings import ModelType, LangRec, OCRVersion
         cv2.setNumThreads(1)
         logger = logging.getLogger("RapidOCR")
         logger.handlers.clear()
@@ -74,12 +78,18 @@ def initialize():
         _FONT = pymupdf.Font(fontfile=str(required_assets()[3]))
         _ENGINE = RapidOCR(params={**runtime_params(),
             "Det.model_path": str(required_assets()[4]), "Det.model_type": ModelType.TINY,
-            "Rec.model_path": str(required_assets()[0]), "Rec.model_type": ModelType.TINY})
+            "Rec.model_path": str(required_assets()[6]),
+            "Rec.model_type": ModelType.MOBILE, "Rec.lang_type": LangRec.EN,
+            "Rec.ocr_version": OCRVersion.PPOCRV5})
 
 
 def recognizer(kind):
-    global _SMALL, _ARABIC, _ARABIC_V4
+    global _SMALL, _MEDIUM, _ARABIC, _ARABIC_V4
     from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
+    if kind == "quality":
+        if _MEDIUM is None:
+            _MEDIUM = _make_recognizer(required_assets()[5], LangRec.CH, ModelType.MEDIUM, OCRVersion.PPOCRV6)
+        return _MEDIUM
     if kind == "arabic":
         if _ARABIC is None:
             _ARABIC = _make_recognizer(required_assets()[1], LangRec.ARABIC, ModelType.MOBILE, OCRVersion.PPOCRV5)
@@ -127,19 +137,38 @@ def language_probes(boxes, width):
 def full_ocr(image, progress=None):
     global LAST_LOW_CONFIDENCE, LAST_METRICS
     initialize()
-    from rapidocr.ch_ppocr_rec.typings import TextRecInput
+    from rapidocr.ch_ppocr_rec.typings import TextRecInput, TextRecOutput
     from rapidocr.main import RapidOCRError
     from rapidocr.utils.process_img import map_boxes_to_original
     LAST_METRICS = {}
     LAST_LOW_CONFIDENCE = False
 
-    def stage(name, function):
-        if progress:
+    def stage(name, function, announce=True):
+        if progress and announce:
             progress(name)
         started = time.monotonic()
         result = function()
-        LAST_METRICS[name] = round(time.monotonic() - started, 3)
+        LAST_METRICS[name] = round(LAST_METRICS.get(name, 0) + time.monotonic() - started, 3)
         return result
+
+    def read_crops(name, engine, images):
+        # Keep memory and time between progress events bounded. Sort globally by
+        # aspect ratio so one long line cannot pad a batch of short table cells.
+        order = sorted(range(len(images)), key=lambda i: images[i].shape[1] / max(1, images[i].shape[0]))
+        texts = [""] * len(images)
+        scores = [0.0] * len(images)
+        for offset in range(0, len(order), 24):
+            indices = order[offset:offset + 24]
+            if progress:
+                progress(f"{name}: {offset}/{len(order)} text regions")
+            result = stage(name, lambda: engine(TextRecInput(img=[images[i] for i in indices], return_word_box=False)), announce=False)
+            if len(result.txts or ()) != len(indices) or len(result.scores) != len(indices):
+                raise RuntimeError("OCR returned an incomplete recognition batch")
+            for i, text, score in zip(indices, result.txts, result.scores):
+                texts[i], scores[i] = text, float(score)
+            if progress:
+                progress(f"{name}: {offset + len(indices)}/{len(order)} text regions")
+        return TextRecOutput(txts=tuple(texts), scores=scores)
 
     original = _ENGINE.load_img(image)
     processed, operations = _ENGINE.preprocess_img(original)
@@ -147,9 +176,13 @@ def full_ocr(image, progress=None):
         crops, detection = stage("Finding printed text", lambda: _ENGINE.detect_and_crop(processed, operations))
     except RapidOCRError:
         return []
+    # Detect at bounded resolution, then recrop from the original raster so
+    # tiny characters are not irreversibly downsampled before recognition.
+    original_boxes = map_boxes_to_original(detection.boxes.copy(), operations, original.shape[0], original.shape[1])
+    crops = _ENGINE.crop_text_regions(original, original_boxes)
     # Avoid the classifier's false per-line flips. Retry orientation only where
     # recognition is uncertain, preserving normal upright printed lines.
-    primary = stage("Reading printed text", lambda: _ENGINE.text_rec(TextRecInput(img=crops, return_word_box=False)))
+    primary = read_crops("Reading printed text", _ENGINE.text_rec, crops)
     texts, scores = list(primary.txts or ()), list(primary.scores)
     if not texts:
         return []
@@ -158,8 +191,7 @@ def full_ocr(image, progress=None):
     def recognize_indices(kind, indices):
         if not indices:
             return {}
-        result = stage("Checking " + kind.replace("_", " "), lambda: recognizer(kind)(
-            TextRecInput(img=[crops[i] for i in indices], return_word_box=False)))
+        result = read_crops("Checking " + kind.replace("_", " "), recognizer(kind), [crops[i] for i in indices])
         return {i: (t, float(s)) for i, t, s in zip(indices, result.txts or (), result.scores)}
 
     groups, probes = language_probes(detection.boxes, processed.shape[1])
@@ -175,15 +207,31 @@ def full_ocr(image, progress=None):
     upside_down = [i for i in range(count) if scores[i] < .80 and i not in arabic_lines]
     if upside_down:
         flipped = [np.ascontiguousarray(np.rot90(crops[i], 2)) for i in upside_down]
-        retry = stage("Checking text orientation", lambda: _ENGINE.text_rec(TextRecInput(img=flipped, return_word_box=False)))
+        retry = read_crops("Checking text orientation", _ENGINE.text_rec, flipped)
         for i, crop, text, score in zip(upside_down, flipped, retry.txts or (), retry.scores):
             if score > scores[i]:
                 crops[i], texts[i], scores[i] = crop, text, float(score)
-    # A single small printed-text retry replaces the 81 MB handwriting model.
-    low = [i for i in range(count) if scores[i] < .85 and i not in arabic_lines]
-    for i, (text, score) in recognize_indices("printed_text", low).items():
-        if score > scores[i]:
+    # Medium is materially slower on CPU. Spend its bounded second pass on
+    # uncertain regions, numbers and short Roman-numeral section labels. Model
+    # confidence is only a routing signal, never proof of correctness.
+    candidates = [i for i in range(count) if i not in arabic_lines and (
+        scores[i] < .92 or
+        (any(c.isdigit() for c in texts[i]) and scores[i] < .985) or
+        re.match(r"^[IVXLC]+\s*[.)]", texts[i].strip()))]
+    candidates.sort(key=lambda i: (scores[i], i))
+    low = candidates[:8]
+    disagreements = 0
+    for i, (text, score) in recognize_indices("quality", low).items():
+        if not text.strip():
+            continue
+        # Retain a usable first reading if the stronger pass cannot read it.
+        if score >= .85 or score > scores[i]:
+            if re.sub(r"\s+", "", text) != re.sub(r"\s+", "", texts[i]):
+                disagreements += 1
             texts[i], scores[i] = text, score
+    LAST_METRICS["quality_candidates"] = len(candidates)
+    LAST_METRICS["quality_deferred"] = max(0, len(candidates) - len(low))
+    LAST_METRICS["model_disagreements"] = disagreements
     low_arabic = [i for i in arabic_lines if arabic[i][1] < .80]
     for i, candidate in recognize_indices("arabic_retry", low_arabic).items():
         if is_arabic(*candidate) and candidate[1] > arabic[i][1]:
@@ -192,12 +240,11 @@ def full_ocr(image, progress=None):
     for i in arabic_lines:
         # PyMuPDF reorders the positioned PDF text layer during extraction.
         texts[i], scores[i] = get_display(arabic[i][0]), arabic[i][1]
-    LAST_LOW_CONFIDENCE = any(s < NOISE_FLOOR for s in scores)
+    LAST_LOW_CONFIDENCE = any(s < .92 for s in scores) or bool(disagreements) or len(candidates) > len(low)
     LAST_METRICS["lines"] = count
     LAST_METRICS["printed_retries"] = len(low)
     LAST_METRICS["arabic_lines"] = len(arabic_lines)
-    boxes = map_boxes_to_original(detection.boxes.copy(), operations, original.shape[0], original.shape[1])
-    return list(zip(boxes, texts, scores))
+    return list(zip(original_boxes, texts, scores))
 
 
 def smoke_test():
@@ -254,12 +301,16 @@ def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False, pro
                     replace.append(span["bbox"])
                 else:
                     healthy.append(span["bbox"])
+    if progress:
+        progress("Rendering scanned page")
     # Photographs sometimes have pixel dimensions stored as PDF points. Never
     # expand a 2000px photo into an 8333px raster just because its page is huge.
     dpi = max(36, min(int(dpi), int(72 * 3000 / max(page.rect.width, page.rect.height))))
     pix, empty = get_pixmap(page.get_displaylist(), dpi=dpi, rects=healthy, empty_threshold=250)
     if empty:
         return
+    if progress:
+        progress(f"Page raster ready: {pix.width} × {pix.height} pixels")
     image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
     result = full_ocr(image, progress)
     matrix = pymupdf.Rect(pix.irect).torect(page.rect)
@@ -272,9 +323,8 @@ def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False, pro
         if not text.strip():
             continue
         if score < NOISE_FLOOR:
-            text = ILLEGIBLE_MARKER
             LAST_LOW_CONFIDENCE = True
-            LAST_METRICS['illegible_regions'] = LAST_METRICS.get('illegible_regions', 0) + 1
+            LAST_METRICS['uncertain_regions'] = LAST_METRICS.get('uncertain_regions', 0) + 1
         rect = pymupdf.Rect(float(np.min(box[:, 0])), float(np.min(box[:, 1])),
                            float(np.max(box[:, 0])), float(np.max(box[:, 1]))) * matrix
         # The official adapter assumes a font with near-unit line height.
@@ -289,3 +339,14 @@ def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False, pro
             # use the official adapter's filled-text mode so both are extracted.
             page.insert_text(origin, text, fontsize=size, fontname="pdf2aiocr", render_mode=0,
                              morph=(origin, pymupdf.Matrix(rect.width / width, 1)))
+
+
+def shutdown():
+    """Release native sessions before Python/native library teardown begins."""
+    global _ENGINE, _SMALL, _MEDIUM, _ARABIC, _ARABIC_V4, _FONT
+    _ENGINE = _SMALL = _MEDIUM = _ARABIC = _ARABIC_V4 = _FONT = None
+    import gc
+    gc.collect()
+
+
+atexit.register(shutdown)

@@ -1,4 +1,4 @@
-"""Page-progress local extraction with explicit markers for uncertain OCR."""
+"""Page-progress local extraction preserving uncertain OCR with review warnings."""
 import errno
 import os
 from pathlib import Path
@@ -6,7 +6,7 @@ import sys
 import tempfile
 import time
 from typing import Optional
-from pdf2ai.extraction.validation import inspect_chunks, markdown_parts
+from pdf2ai.extraction.validation import inspect_chunks, markdown_parts, missing_token_count
 from pdf2ai.utils.paths import publish
 
 _OFFLINE = False
@@ -44,7 +44,7 @@ def check_ocr(lightweight=False) -> dict:
             multilingual_ocr.smoke_test()
         return {
             "available": True,
-            "detail": "Printed-document OCR: PP-OCRv6 / ONNX Runtime, bilingual column probes; no handwriting model",
+            "detail": "Printed-document OCR: dedicated English/Arabic readers + bounded PP-OCRv6 medium review / ONNX Runtime",
         }
     except Exception as exc:
         # Exception strings from OCR may include recognized content. Never log them.
@@ -93,7 +93,7 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
         count = doc.page_count
         if not count:
             raise PDFError("This PDF has no pages.")
-        state = check_ocr() if ocr_state is None else ocr_state
+        state = check_ocr(lightweight=True) if ocr_state is None else ocr_state
         # Explicit activation fails if Layout is unavailable; never silently fall
         # back to the legacy engine, where OCR/settings have different behavior.
         pymupdf4llm.use_layout(True)
@@ -118,6 +118,7 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
                 progress(done, count, stage, time.monotonic() - started)
         chunks = []
         uncertain = []
+        possible_loss = []
         page_timings = []
         # Modern Layout analyzes individual pages. Keep the same document open
         # and retain only Markdown/metadata, releasing image/layout data per page.
@@ -139,21 +140,29 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
                     return multilingual_ocr.exec_ocr(*args, **kwargs,
                         progress=lambda stage: report(page_number, stage))
                 options["ocr_function"] = recognize
+            report(page_number, "Analyzing page layout and tables")
             page_chunks = pymupdf4llm.to_markdown(doc, pages=[page_number], **options)
             if not isinstance(page_chunks, list):
                 raise PDFError("The extraction engine returned an unexpected format. Reinstall PDF2AI.")
             chunks.extend({"metadata": c["metadata"], "text": c["text"]} for c in page_chunks)
+            missing = missing_token_count(page.get_text(), '\n'.join(c['text'] for c in page_chunks))
+            if missing:
+                possible_loss.append(page_number + 1)
             if multilingual_ocr.LAST_LOW_CONFIDENCE:
                 uncertain.append(page_number + 1)
             page_timings.append({"page": page_number + 1,
                 "seconds": round(time.monotonic() - page_started, 3),
+                "possible_missing_tokens": missing,
                 "ocr": dict(multilingual_ocr.LAST_METRICS)})
             report(page_number + 1, "Page complete")
     if not isinstance(chunks, list):
         raise PDFError("The extraction engine returned an unexpected format. Reinstall PDF2AI.")
     ordered, warnings = inspect_chunks(chunks, count)
     if uncertain:
-        warnings.append("Uncertain text was replaced with [illegible]; review pages: " + ", ".join(map(str, uncertain)))
+        warnings.append("Some text was uncertain and has been retained; review pages: " + ", ".join(map(str, uncertain)))
+    if possible_loss:
+        warnings.append("Some text in the working PDF layer was not matched in Markdown; compare with the original on pages: "
+                        + ", ".join(map(str, possible_loss)))
     if not state["available"]:
         warnings.insert(0, "Scanned pages could not be recognized because local OCR is unavailable. This output may be incomplete.")
     folder = output_dir if output_dir is not None else source.parent / "PDF2AI Output"

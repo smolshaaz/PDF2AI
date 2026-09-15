@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 import os
+import platform
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -14,5 +15,7 @@ def configure_logging(folder: Path):
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
+        from pdf2ai import __version__
+        logger.info("PDF2AI %s; Python %s; %s; CPUs=%s", __version__, platform.python_version(), platform.platform(), os.cpu_count())
         logger.info("Session started; log file: %s", handler.baseFilename)
     return logger

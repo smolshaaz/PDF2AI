@@ -24,4 +24,6 @@ def ocr_state():
     from pdf2ai.extraction.converter import check_ocr
     state = check_ocr()
     assert state["available"], state
-    return state
+    yield state
+    from pdf2ai.extraction.multilingual_ocr import shutdown
+    shutdown()
