@@ -68,7 +68,9 @@ def rendered_html(markdown):
 def iter_pages(path):
     """Stream one source page at a time; preserve the exact text for source view."""
     number, lines = None, []
-    with path.open(encoding="utf-8", newline="") as stream:
+    # Universal newlines keep the in-memory page text identical to normal
+    # UTF-8 reads on Windows as well as macOS/Linux.
+    with path.open(encoding="utf-8", newline=None) as stream:
         for line in stream:
             match = PAGE_MARKER.match(line)
             if match:

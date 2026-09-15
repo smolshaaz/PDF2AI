@@ -4,11 +4,19 @@ from pathlib import Path
 import tempfile
 
 from PySide6.QtCore import QByteArray, QMarginsF, QRectF, QSizeF, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
 from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QMenu,
     QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QTabWidget, QTextBrowser, QVBoxLayout)
 
 from pdf2ai.utils.markdown import CSS, iter_pages, plain_text, rendered_html
+
+
+def document_font():
+    """Use the bundled Unicode font so exported PDFs retain searchable text."""
+    font_path = Path(__file__).parents[1] / "assets" / "fonts" / "NotoSansArabic.ttf"
+    font_id = QFontDatabase.addApplicationFont(str(font_path))
+    families = QFontDatabase.applicationFontFamilies(font_id)
+    return QFont(families[0] if families else "Arial", 11)
 
 
 class LocalBrowser(QTextBrowser):
@@ -19,7 +27,7 @@ class LocalBrowser(QTextBrowser):
 
 def make_document(markdown):
     document = QTextDocument()
-    document.setDefaultFont(QFont("Segoe UI", 11))
+    document.setDefaultFont(document_font())
     document.setDefaultStyleSheet(CSS)
     document.setHtml(rendered_html(markdown))
     return document
@@ -70,7 +78,9 @@ def export_document(source, target, kind, stopped=lambda: False, progress=lambda
                         painter.translate(0, -part * height)
                         document.drawContents(painter, QRectF(0, part * height, width, height))
                         painter.restore()
-                        painter.setFont(QFont("Segoe UI", 9))
+                        footer_font = document_font()
+                        footer_font.setPointSize(9)
+                        painter.setFont(footer_font)
                         painter.drawText(QRectF(0, height + 8, width, 24), Qt.AlignRight,
                                          f"Source page {number}" + (f" · continued {part + 1}" if part else ""))
                     progress(number)
