@@ -1,4 +1,5 @@
 from pathlib import Path
+import unicodedata
 import pytest
 import pymupdf
 from pdf2ai.utils.markdown import iter_pages, plain_text, rendered_html
@@ -72,7 +73,9 @@ def test_pdf_and_text_export(qapp, markdown_file):
         text = "".join(page.get_text() for page in document)
         assert "Hospital" in text and "5000" in text
         assert "Source page 2" in text
-        assert any("\u0600" <= char <= "\u06ff" for char in text)
+        # Embedded Arabic fonts may expose presentation forms to a PDF reader;
+        # normalize before checking the Unicode text content.
+        assert any("\u0600" <= char <= "\u06ff" for char in unicodedata.normalize("NFKC", text))
     assert "[Page 2]" in markdown_file.with_suffix(".txt").read_text(encoding="utf-8")
 
 

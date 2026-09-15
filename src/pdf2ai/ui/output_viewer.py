@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import tempfile
+import textwrap
 
 from PySide6.QtCore import QByteArray, QMarginsF, QRectF, QSizeF, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QPageLayout, QPageSize, QPainter, QPdfWriter, QTextDocument
@@ -52,46 +53,60 @@ def export_document(source, target, kind, stopped=lambda: False, progress=lambda
                 stream.flush()
                 os.fsync(stream.fileno())
         else:
-            writer = QPdfWriter(str(temp))
-            writer.setResolution(96)
-            writer.setPageSize(QPageSize(QPageSize.A4))
-            writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Millimeter)
-            writer.setTitle(source.name)
-            writer.setCreator("PDF2AI — local rendered Markdown export")
-            painter = QPainter(writer)
-            if not painter.isActive():
-                raise OSError("Could not start PDF export")
-            first = True
-            width, height = writer.width(), writer.height() - 36
-            try:
-                for number, markdown in iter_pages(source):
-                    document = make_document(markdown)
-                    document.setPageSize(QSizeF(width, height))
-                    for part in range(document.pageCount()):
-                        if stopped():
-                            raise InterruptedError()
-                        if not first and not writer.newPage():
-                            raise OSError("Could not write PDF page")
-                        first = False
-                        painter.save()
-                        painter.setClipRect(QRectF(0, 0, width, height))
-                        painter.translate(0, -part * height)
-                        document.drawContents(painter, QRectF(0, part * height, width, height))
-                        painter.restore()
-                        footer_font = document_font()
-                        footer_font.setPointSize(9)
-                        painter.setFont(footer_font)
-                        painter.drawText(QRectF(0, height + 8, width, 24), Qt.AlignRight,
-                                         f"Source page {number}" + (f" · continued {part + 1}" if part else ""))
-                    progress(number)
-            finally:
-                painter.end()
-                del writer
+            _export_searchable_pdf(source, temp, stopped, progress)
         if stopped():
             raise InterruptedError()
         os.replace(temp, target)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def _export_searchable_pdf(source, target, stopped, progress):
+    """Create a local reading PDF with reliable Unicode text extraction.
+
+    Qt's QPdfWriter can emit an invalid character map on Windows for embedded
+    fonts. PyMuPDF writes the Unicode map directly, keeping exported English
+    and Arabic searchable and copyable across platforms.
+    """
+    import pymupdf
+
+    font_path = Path(__file__).parents[1] / "assets" / "fonts" / "NotoSansArabic.ttf"
+    document = pymupdf.open()
+    page_rect = pymupdf.paper_rect("a4")
+    text_rect = pymupdf.Rect(42, 42, page_rect.width - 42, page_rect.height - 52)
+    footer_rect = pymupdf.Rect(42, page_rect.height - 35, page_rect.width - 42, page_rect.height - 16)
+
+    def wrapped_lines(text):
+        for line in text.splitlines() or [""]:
+            if not line:
+                yield ""
+            else:
+                yield from textwrap.wrap(line.expandtabs(4), width=88, replace_whitespace=False,
+                                           break_long_words=False, break_on_hyphens=False) or [""]
+
+    try:
+        for number, markdown in iter_pages(source):
+            lines = list(wrapped_lines(plain_text(markdown)))
+            for part, start in enumerate(range(0, max(1, len(lines)), 48), start=1):
+                if stopped():
+                    raise InterruptedError()
+                page = document.new_page(width=page_rect.width, height=page_rect.height)
+                body = "\n".join(lines[start:start + 48])
+                # Base-14 Helvetica gives clean searchable Latin text. Switch
+                # to the embedded Unicode font only for pages carrying Arabic.
+                body_font = "pdf2aiunicode" if any("\u0600" <= char <= "\u06ff" for char in body) else "helv"
+                if body_font == "pdf2aiunicode":
+                    page.insert_font(fontname=body_font, fontfile=str(font_path))
+                page.insert_textbox(text_rect, body, fontname=body_font,
+                                    fontsize=10, lineheight=1.28, color=(0.14, 0.19, 0.26))
+                label = f"Source page {number}" + (f" · continued {part}" if part > 1 else "")
+                page.insert_textbox(footer_rect, label, fontname="helv", fontsize=8,
+                                    align=pymupdf.TEXT_ALIGN_RIGHT, color=(0.32, 0.38, 0.47))
+            progress(number)
+        document.set_metadata({"title": source.name, "author": "PDF2AI", "creator": "PDF2AI local export"})
+        document.save(str(target), garbage=4, deflate=True)
+    finally:
+        document.close()
 
 
 class ExportWorker(QThread):
