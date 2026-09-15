@@ -132,3 +132,6 @@ dialog::backdrop { background:rgba(23,31,44,.55); backdrop-filter:blur(3px); }
   .markdown-body .document-page{break-after:page;margin:0!important;padding:0!important;border:0!important;box-shadow:none!important}
   .markdown-body .page-label{display:none}
 }
+
+[hidden] { display: none !important; }
+#detailsLog { background: #f1f5f9; color: #172033; }

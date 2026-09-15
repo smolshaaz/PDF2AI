@@ -22,5 +22,5 @@ export default defineConfig({
   plugins: [copyLanguageData()],
   define: { process: 'undefined' },
   worker: { format: 'es' },
-  build: { target: 'es2022', sourcemap: false },
+  build: { rollupOptions: { input: { main: resolve('index.html'), engine: resolve('engine.html') } }, target: 'es2022', sourcemap: false },
 });

@@ -40,7 +40,7 @@ def create_app(token: str = None) -> FastAPI:
             "img-src 'self' blob: data:; "
             "connect-src 'self' blob: data:; "
             "font-src 'self'; "
-            "frame-src 'none'; "
+            "frame-src 'self'; "
             "object-src 'none'; "
             "base-uri 'none';"
         )

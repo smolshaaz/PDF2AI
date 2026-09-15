@@ -1,5 +1,7 @@
 """Run PDF extraction outside the Qt process without multiprocessing pipes."""
 import json
+import logging
+import uuid
 import os
 from pathlib import Path
 import subprocess
@@ -35,6 +37,10 @@ class ConversionWorker(QThread):
 
     def __init__(self, paths=(), check_only=False, output_dir: Optional[Path] = None, parent=None):
         super().__init__(parent)
+        self.session_id = uuid.uuid4().hex[:12]
+        self.logger = logging.getLogger("pdf2ai")
+        self.last_activity = time.monotonic()
+        self.last_stage = "Starting worker"
         self.paths = list(paths)
         self.check_only = check_only
         self.output_dir = str(output_dir) if output_dir is not None else None
@@ -56,6 +62,7 @@ class ConversionWorker(QThread):
     def stop_now(self):
         self.stop_requested.set()
         self.abort_requested.set()
+        self.logger.info("Job %s: stop requested", self.session_id)
 
     def _emit_available_events(self, event_file: Path, offset: int, pending: bytes):
         if not event_file.exists():
@@ -77,6 +84,12 @@ class ConversionWorker(QThread):
                 fatal_seen = True
                 continue
             if isinstance(event, list) and event:
+                self.last_activity = time.monotonic()
+                if event[0] == "progress":
+                    self.last_stage = str(event[3])
+                elif event[0] in {"started", "result", "ocr", "fatal"}:
+                    self.last_stage = event[0]
+                self.logger.info("Job %s: event=%s stage=%s", self.session_id, event[0], self.last_stage)
                 if event[0] == "fatal":
                     fatal_seen = True
                 self.event.emit(tuple(event))
@@ -87,6 +100,7 @@ class ConversionWorker(QThread):
 
     def run(self):
         fatal_seen = False
+        self.logger.info("Job %s: starting; files=%s", self.session_id, len(self.paths))
         try:
             with tempfile.TemporaryDirectory(prefix="pdf2ai-worker-") as temp_name:
                 temp = Path(temp_name)
@@ -122,14 +136,25 @@ class ConversionWorker(QThread):
                 )
                 offset = 0
                 pending = b""
+                heartbeat = time.monotonic()
+                self.last_activity = heartbeat
                 while self._process.poll() is None:
+                    now = time.monotonic()
+                    if now - heartbeat >= 15:
+                        self.logger.info("Job %s: worker PID=%s alive; stage=%s; no event for %.0fs",
+                                         self.session_id, self._process.pid, self.last_stage, now - self.last_activity)
+                        heartbeat = now
+                    if now - self.last_activity >= 300 and not self.abort_requested.is_set():
+                        self.event.emit(("fatal", "Stopped after 5 minutes without progress. Retry the file; session logs record the stalled stage."))
+                        self.abort_requested.set()
+                        fatal_seen = True
                     if self.abort_requested.is_set():
                         self._process.terminate()
                         try:
                             self._process.wait(timeout=3)
                         except subprocess.TimeoutExpired:
                             self._process.kill()
-                            self._process.wait()
+                            self._process.wait(timeout=3)
                         break
                     offset, pending, new_fatal = self._emit_available_events(
                         event_file, offset, pending
@@ -165,6 +190,10 @@ class ConversionWorker(QThread):
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    process.wait()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self.logger.error("Job %s: operating system has not confirmed worker exit after kill", self.session_id)
+            self.logger.info("Job %s: finished; cancelled=%s", self.session_id, self.abort_requested.is_set())
             self._process = None
             self._stop_file = None

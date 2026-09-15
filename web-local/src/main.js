@@ -1,4 +1,3 @@
-import scribe from 'scribe.js-ocr';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import './style.css';
@@ -9,20 +8,13 @@ const logs = [];
 let selected = new Set();
 let running = false;
 let stopping = false;
-let currentDoc = null;
+let activeTask = null;
+let sessionId = crypto.randomUUID();
+const sessionLogs = (() => {
+  try { return JSON.parse(sessionStorage.getItem('pdf2ai-session-logs') || '[]'); }
+  catch { return []; }
+})();
 let currentResult = null;
-
-scribe.opt.langPath = new URL('./tessdata', window.location.href).href.replace(/\/$/, '');
-scribe.opt.workerN = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 1));
-scribe.opt.warningHandler = (message) => log(`Warning: ${formatMessage(message)}`);
-scribe.opt.errorHandler = (message) => log(`OCR: ${formatMessage(message)}`);
-scribe.ScribeDoc.defaults.reflow = true;
-scribe.ScribeDoc.defaults.removeMargins = false;
-scribe.ScribeDoc.defaults.enableLayout = true;
-scribe.ScribeDoc.defaults.usePDFText = {
-  native: { supp: true, main: true },
-  ocr: { supp: false, main: false },
-};
 
 function formatMessage(value) {
   if (value instanceof Error) return `${value.name}: ${value.message}`;
@@ -32,6 +24,10 @@ function formatMessage(value) {
 
 function log(message) {
   const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const entry = `${new Date().toISOString()} [${sessionId}] ${message}`;
+  sessionLogs.push(entry);
+  if (sessionLogs.length > 2000) sessionLogs.shift();
+  try { sessionStorage.setItem('pdf2ai-session-logs', JSON.stringify(sessionLogs)); } catch {}
   logs.push(`${stamp}  ${message}`);
   if (logs.length > 100) logs.shift();
   $('detailsLog').textContent = logs.join('\n');
@@ -170,63 +166,86 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 }
 
-async function assembleMarkdown(doc, fileName) {
-  const pages = [];
-  const emptyPages = [];
-  for (let i = 0; i < doc.inputData.pageCount; i++) {
-    const text = String(await doc.exportData('md', { pageArr: [i], enableLayout: true, reflow: true })).trimEnd();
-    if (!text.trim()) emptyPages.push(i + 1);
-    pages.push(`<!-- PAGE ${i + 1} -->\n\n${text}`);
-  }
-  const header = `<!-- PDF2AI\nSource: ${fileName}\nPages: ${doc.inputData.pageCount}\nGenerated locally in this browser by PDF2AI\n-->`;
-  return { markdown: `${header}\n\n${pages.join('\n\n')}\n`, emptyPages };
-}
-
-function setProgress(item, page, total, stage, start) {
-  const percent = total ? Math.max(1, Math.min(99, Math.round((page / total) * 100))) : 1;
-  $('workTitle').textContent = `Processing ${item.file.name}`;
-  $('workStage').textContent = stage;
-  $('workPercent').textContent = `${percent}%`;
-  $('progressBar').value = percent;
-  $('timeLabel').textContent = `Elapsed ${elapsed(start)}`;
+// A separate browsing context owns the entire engine, including its worker pools.
+// Removing it and terminating its workers does not depend on OCR promises resolving.
+function runEngine(file, onProgress) {
+  const frame = document.createElement('iframe');
+  frame.hidden = true;
+  frame.src = new URL('./engine.html', window.location.href).href;
+  let settle;
+  let finished = false;
+  let lastProgress = performance.now();
+  const start = lastProgress;
+  let stage = 'Starting local engine';
+  const cleanup = () => {
+    clearInterval(timer);
+    window.removeEventListener('message', receive);
+    try { frame.contentWindow?.stopEngine?.(); } catch {}
+    frame.remove();
+  };
+  const finish = (error, result) => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    error ? settle.reject(error) : settle.resolve(result);
+  };
+  const receive = (event) => {
+    if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
+    const message = event.data;
+    if (message.type === 'ready') {
+      frame.contentWindow.postMessage({ type: 'convert', file }, location.origin);
+    } else if (message.type === 'progress') {
+      lastProgress = performance.now();
+      stage = message.stage;
+      log(stage);
+      onProgress(message);
+    } else if (message.type === 'done') finish(null, message.result);
+    else if (message.type === 'error') finish(new Error(message.error));
+  };
+  const timer = setInterval(() => {
+    const idle = Math.round((performance.now() - lastProgress) / 1000);
+    $('timeLabel').textContent = `Elapsed ${elapsed(start)} · last activity ${idle}s ago`;
+    if (idle >= 30 && idle % 15 === 0) log(`Still waiting: ${stage}; no progress for ${idle}s; tab ${document.visibilityState}`);
+    if (idle >= 60) $('workStage').textContent = `${stage} — waiting ${idle}s. You can stop and retry.`;
+    if (idle >= 180) finish(new Error(`Stopped after 3 minutes without progress during: ${stage}. Download session logs and retry.`));
+  }, 1000);
+  const promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  window.addEventListener('message', receive);
+  document.body.append(frame);
+  return { promise, cancel: () => finish(new DOMException('Conversion stopped.', 'AbortError')) };
 }
 
 async function convertItem(item, index, totalFiles) {
   const start = performance.now();
   item.status = 'Processing';
   renderQueue();
-  setProgress(item, 0, 1, `Opening file ${index + 1} of ${totalFiles}`, start);
-  log(`Opening ${item.file.name}`);
-  const doc = await scribe.openDocument([item.file]);
-  currentDoc = doc;
-  item.pages = doc.inputData.pageCount;
-  renderQueue();
-  if (!doc.inputData.pageCount) throw new Error('This PDF has no pages.');
-
-  doc.progressHandler = (event) => {
-    const page = Number.isInteger(event?.n) ? event.n + 1 : 0;
-    const stages = { importPDF: 'Reading PDF', importImage: 'Reading page', recognize: 'Recognizing text', convert: 'Building page', export: 'Creating Markdown', render: 'Rendering page' };
-    setProgress(item, page, doc.inputData.pageCount, `${stages[event?.type] || 'Processing'}${page ? ` — page ${page} of ${doc.inputData.pageCount}` : ''}`, start);
-  };
-
-  const type = doc.inputData.pdfType;
-  if (type !== 'text') {
-    setProgress(item, 0, doc.inputData.pageCount, type === 'ocr' ? 'Replacing existing scan text' : 'Recognizing scanned pages', start);
-    await doc.recognize({ langs: ['eng', 'ara'], modeAdv: 'lstm', combineMode: 'none' });
-  } else {
-    log(`${item.file.name}: using its healthy native text layer.`);
-  }
-  if (stopping) throw new DOMException('Conversion stopped.', 'AbortError');
-
-  setProgress(item, doc.inputData.pageCount, doc.inputData.pageCount, 'Creating Markdown', start);
-  const { markdown, emptyPages } = await assembleMarkdown(doc, item.file.name);
-  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
-  item.result = { name: outputName(item.file.name), sourceName: item.file.name, markdown, blob, pages: doc.inputData.pageCount, emptyPages, seconds: Math.round((performance.now() - start) / 1000) };
-  item.status = emptyPages.length ? 'Done — review suggested' : 'Done ✓';
-  currentResult = item.result;
-  log(`${item.file.name}: done in ${item.result.seconds}s${emptyPages.length ? `; little or no text on pages ${emptyPages.join(', ')}` : ''}.`);
-  await doc.terminate();
-  currentDoc = null;
+  $('workTitle').textContent = `Processing ${item.file.name} · file ${index + 1} of ${totalFiles}`;
+  $('workStage').textContent = 'Starting local engine';
+  $('progressBar').removeAttribute('value');
+  $('workPercent').textContent = 'Preparing';
+  log(`Opening ${item.file.name}; bytes=${item.file.size}`);
+  activeTask = runEngine(item.file, (message) => {
+    $('workStage').textContent = message.stage;
+    if (message.total) item.pages = message.total;
+    if (message.percent == null) {
+      $('progressBar').removeAttribute('value');
+      $('workPercent').textContent = 'Preparing';
+    } else {
+      $('progressBar').value = message.percent;
+      $('workPercent').textContent = `${message.percent}%`;
+    }
+  });
+  try {
+    const result = await activeTask.promise;
+    const { markdown, emptyPages, pages } = result;
+    item.pages = pages;
+    item.result = { name: outputName(item.file.name), sourceName: item.file.name, markdown,
+      blob: new Blob([markdown], { type: 'text/markdown;charset=utf-8' }), pages, emptyPages,
+      seconds: Math.round((performance.now() - start) / 1000) };
+    item.status = emptyPages.length ? 'Done — review suggested' : 'Done ✓';
+    currentResult = item.result;
+    log(`${item.file.name}: completed ${pages} pages in ${item.result.seconds}s; empty pages: ${emptyPages.join(', ') || 'none'}`);
+  } finally { activeTask = null; }
 }
 
 async function convertAll() {
@@ -235,6 +254,8 @@ async function convertAll() {
   if (!pending.length) { log('Add at least one PDF before converting.'); return; }
   running = true;
   stopping = false;
+  sessionId = crypto.randomUUID();
+  log(`Session started; build=stall-fix-1; files=${pending.length}; logical CPUs=${navigator.hardwareConcurrency || 'unknown'}; memory GB=${navigator.deviceMemory || 'unknown'}`);
   $('workPanel').hidden = false;
   $('resultPanel').hidden = true;
   $('convertButton').textContent = 'Converting…';
@@ -259,8 +280,7 @@ async function convertAll() {
         failed++;
         log(`${item.file.name}: ${formatMessage(error)}`);
       }
-      try { await currentDoc?.terminate(); } catch { /* stopping */ }
-      currentDoc = null;
+
     }
     renderQueue();
   }
@@ -415,11 +435,19 @@ $('resultDownloadButton')?.addEventListener('click', () => {
 $('stopButton').addEventListener('click', async () => {
   stopping = true;
   $('workStage').textContent = 'Stopping safely…';
-  try { await currentDoc?.terminate(); } catch { /* worker is stopping */ }
+  log('Stop requested; terminating engine and worker pools.');
+  activeTask?.cancel();
+});
+
+$('downloadLogs').addEventListener('click', () => {
+  const url = URL.createObjectURL(new Blob([sessionLogs.join('\n')], { type: 'text/plain;charset=utf-8' }));
+  const anchor = document.createElement('a');
+  anchor.href = url; anchor.download = `PDF2AI-session-${sessionId}.log`; anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
 });
 
 $('copyDetails').addEventListener('click', async () => {
-  await navigator.clipboard.writeText($('detailsLog').textContent);
+  await navigator.clipboard.writeText(sessionLogs.join('\n'));
   $('copyDetails').textContent = 'Copied';
   setTimeout(() => $('copyDetails').textContent = 'Copy details', 1200);
 });
