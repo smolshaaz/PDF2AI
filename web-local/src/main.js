@@ -53,32 +53,117 @@ function addFiles(files) {
       continue;
     }
     queue.push({ key: fileKey(file), file, pages: '—', status: 'Ready', result: null });
+    selected.add(fileKey(file));
     added++;
   }
   if (added) log(`Added ${added} PDF${added === 1 ? '' : 's'}. Files remain in this browser.`);
   renderQueue();
 }
 
+function getSelectedOrLatestResult() {
+  const selectedItems = queue.filter((item) => selected.has(item.key) && item.result);
+  if (selectedItems.length > 0) return selectedItems[0].result;
+  const doneItems = queue.filter((item) => item.result);
+  if (doneItems.length > 0) return doneItems[doneItems.length - 1].result;
+  return currentResult;
+}
+
 function renderQueue() {
   const body = $('queueBody');
   body.replaceChildren();
+
   for (const item of queue) {
     const row = document.createElement('tr');
-    if (selected.has(item.key)) row.className = 'selected';
-    const statusClass = item.status.startsWith('Done') ? 'done' : item.status === 'Failed' ? 'failed' : item.status === 'Processing' ? 'working' : '';
-    row.innerHTML = `<td><input type="checkbox" aria-label="Select ${escapeHtml(item.file.name)}" ${selected.has(item.key) ? 'checked' : ''}></td><td class="file-name" title="${escapeHtml(item.file.name)}">${escapeHtml(item.file.name)}</td><td>${item.pages}</td><td class="status ${statusClass}">${escapeHtml(item.status)}</td><td>${item.result ? '<button class="row-open" type="button">View</button>' : ''}</td>`;
-    row.querySelector('input').addEventListener('change', (event) => {
+    const isSelected = selected.has(item.key);
+    if (isSelected) row.className = 'selected';
+
+    const statusClass = item.status.startsWith('Done')
+      ? 'done'
+      : item.status === 'Failed'
+      ? 'failed'
+      : item.status.startsWith('Processing') || item.status.startsWith('Reading') || item.status.startsWith('Recognizing')
+      ? 'working'
+      : '';
+
+    const actionHtml = item.result
+      ? `<div class="row-actions">
+           <button class="row-btn view" type="button" title="View output preview">👁️ View</button>
+           <button class="row-btn download" type="button" title="Download .ai.md">⬇️ Save</button>
+         </div>`
+      : `<span style="color:#94a3b8">—</span>`;
+
+    row.innerHTML = `
+      <td style="text-align:center;">
+        <input type="checkbox" aria-label="Select ${escapeHtml(item.file.name)}" ${isSelected ? 'checked' : ''}>
+      </td>
+      <td class="file-name" title="${escapeHtml(item.file.name)}">${escapeHtml(item.file.name)}</td>
+      <td style="text-align:center;">${item.pages}</td>
+      <td class="status ${statusClass}">${escapeHtml(item.status)}</td>
+      <td>${actionHtml}</td>
+    `;
+
+    // Click anywhere on row toggles selection (except buttons/inputs)
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('button') || event.target.closest('input')) return;
+      if (selected.has(item.key)) {
+        selected.delete(item.key);
+      } else {
+        selected.add(item.key);
+      }
+      renderQueue();
+    });
+
+    // Checkbox direct change
+    const checkbox = row.querySelector('input[type="checkbox"]');
+    checkbox.addEventListener('change', (event) => {
       event.target.checked ? selected.add(item.key) : selected.delete(item.key);
       renderQueue();
     });
-    row.querySelector('.row-open')?.addEventListener('click', () => openViewer(item.result));
+
+    // Row action buttons
+    row.querySelector('.row-btn.view')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openViewer(item.result);
+    });
+
+    row.querySelector('.row-btn.download')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      downloadResult(item.result);
+    });
+
     body.append(row);
   }
-  $('emptyQueue').hidden = queue.length > 0;
-  $('queueSummary').textContent = queue.length ? `${queue.length} PDF${queue.length === 1 ? '' : 's'} queued` : 'No PDFs queued';
+
+  // Sync select-all checkbox
+  const selectAll = $('selectAllCheckbox');
+  if (selectAll) {
+    selectAll.checked = queue.length > 0 && queue.every((item) => selected.has(item.key));
+    selectAll.indeterminate = queue.some((item) => selected.has(item.key)) && !selectAll.checked;
+  }
+
+  // Update empty state
+  const emptyQueue = $('emptyQueue');
+  if (emptyQueue) {
+    emptyQueue.hidden = queue.length > 0;
+  }
+
+  // Summary & button states
+  $('queueSummary').textContent = queue.length ? `${queue.length} PDF${queue.length === 1 ? '' : 's'} queued (${selected.size} selected)` : 'No PDFs queued';
   $('removeButton').disabled = running || selected.size === 0;
   $('clearButton').disabled = running || queue.length === 0;
   $('convertButton').disabled = running || !queue.some((item) => item.status === 'Ready' || item.status === 'Failed');
+
+  // Separate "View Output" button
+  const availableResult = getSelectedOrLatestResult();
+  const viewOutputBtn = $('viewOutputButton');
+  if (viewOutputBtn) {
+    viewOutputBtn.disabled = !availableResult;
+    if (availableResult) {
+      viewOutputBtn.title = `View output for ${availableResult.sourceName}`;
+    } else {
+      viewOutputBtn.title = 'Convert a PDF first to view output';
+    }
+  }
 }
 
 function escapeHtml(value) {
@@ -126,7 +211,7 @@ async function convertItem(item, index, totalFiles) {
 
   const type = doc.inputData.pdfType;
   if (type !== 'text') {
-    setProgress(item, 0, doc.inputData.pageCount, type === 'ocr' ? 'Replacing the existing scan text layer' : 'Recognizing scanned pages', start);
+    setProgress(item, 0, doc.inputData.pageCount, type === 'ocr' ? 'Replacing existing scan text' : 'Recognizing scanned pages', start);
     await doc.recognize({ langs: ['eng', 'ara'], modeAdv: 'lstm', combineMode: 'none' });
   } else {
     log(`${item.file.name}: using its healthy native text layer.`);
@@ -137,7 +222,8 @@ async function convertItem(item, index, totalFiles) {
   const { markdown, emptyPages } = await assembleMarkdown(doc, item.file.name);
   const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
   item.result = { name: outputName(item.file.name), sourceName: item.file.name, markdown, blob, pages: doc.inputData.pageCount, emptyPages, seconds: Math.round((performance.now() - start) / 1000) };
-  item.status = emptyPages.length ? 'Done — review suggested' : 'Done';
+  item.status = emptyPages.length ? 'Done — review suggested' : 'Done ✓';
+  currentResult = item.result;
   log(`${item.file.name}: done in ${item.result.seconds}s${emptyPages.length ? `; little or no text on pages ${emptyPages.join(', ')}` : ''}.`);
   await doc.terminate();
   currentDoc = null;
@@ -155,12 +241,15 @@ async function convertAll() {
   renderQueue();
   let completed = 0;
   let failed = 0;
+  let lastSuccessfulItem = null;
+
   for (let i = 0; i < pending.length; i++) {
     const item = pending[i];
     if (stopping) { item.status = 'Ready'; continue; }
     try {
       await convertItem(item, i, pending.length);
       completed++;
+      lastSuccessfulItem = item;
     } catch (error) {
       if (error?.name === 'AbortError' || stopping) {
         item.status = 'Ready';
@@ -170,21 +259,39 @@ async function convertAll() {
         failed++;
         log(`${item.file.name}: ${formatMessage(error)}`);
       }
-      try { await currentDoc?.terminate(); } catch { /* already stopping */ }
+      try { await currentDoc?.terminate(); } catch { /* stopping */ }
       currentDoc = null;
     }
     renderQueue();
   }
+
   running = false;
   $('convertButton').textContent = 'Convert';
   $('workPanel').hidden = true;
-  $('resultPanel').hidden = completed === 0 && failed === 0;
-  $('resultTitle').textContent = stopping ? 'Conversion stopped' : `${completed} PDF${completed === 1 ? '' : 's'} converted`;
-  $('resultNote').textContent = failed ? `${failed} file${failed === 1 ? '' : 's'} could not be converted. Open Details for the error.` : 'Select View to inspect the result or download it.';
+
+  if (completed > 0 || failed > 0) {
+    $('resultPanel').hidden = false;
+    $('resultTitle').textContent = stopping
+      ? 'Conversion stopped'
+      : `${completed} PDF${completed === 1 ? '' : 's'} converted successfully!`;
+    $('resultNote').textContent = failed
+      ? `${failed} file${failed === 1 ? '' : 's'} failed. Open Details for error logs.`
+      : 'Click "View Output" to inspect preview or "Download" to save .ai.md.';
+  }
+
+  if (lastSuccessfulItem && lastSuccessfulItem.result) {
+    currentResult = lastSuccessfulItem.result;
+    // If only one file was converted, open viewer directly for instant feedback
+    if (completed === 1 && pending.length === 1 && !stopping) {
+      openViewer(lastSuccessfulItem.result);
+    }
+  }
+
   renderQueue();
 }
 
 function downloadResult(result) {
+  if (!result) return;
   const url = URL.createObjectURL(result.blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -206,13 +313,38 @@ function renderPreview(markdown) {
 }
 
 function openViewer(result) {
+  if (!result) {
+    result = getSelectedOrLatestResult();
+  }
+  if (!result) {
+    log('No converted document available to view.');
+    return;
+  }
   currentResult = result;
   $('viewerName').textContent = result.name;
-  $('viewerMeta').textContent = `${result.pages} pages · ${result.seconds}s${result.emptyPages.length ? ` · Review pages ${result.emptyPages.join(', ')}` : ''}`;
+  $('viewerMeta').textContent = `${result.pages} pages · ${result.seconds}s${result.emptyPages?.length ? ` · Review pages ${result.emptyPages.join(', ')}` : ''}`;
   $('previewPane').innerHTML = renderPreview(result.markdown);
   $('sourcePane').value = result.markdown;
   selectViewerTab('preview');
-  $('viewer').showModal();
+
+  const dialog = $('viewer');
+  if (typeof dialog.showModal === 'function') {
+    try {
+      dialog.showModal();
+    } catch {
+      dialog.setAttribute('open', '');
+    }
+  } else {
+    dialog.setAttribute('open', '');
+  }
+}
+
+function closeViewer() {
+  const dialog = $('viewer');
+  if (typeof dialog.close === 'function') {
+    try { dialog.close(); } catch {}
+  }
+  dialog.removeAttribute('open');
 }
 
 function selectViewerTab(tab) {
@@ -223,25 +355,85 @@ function selectViewerTab(tab) {
   $('sourceTab').classList.toggle('active', !preview);
 }
 
+// Event Listeners
 $('chooseButton').addEventListener('click', (event) => { event.stopPropagation(); $('fileInput').click(); });
 $('dropZone').addEventListener('click', () => $('fileInput').click());
 $('dropZone').addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') $('fileInput').click(); });
 $('fileInput').addEventListener('change', (event) => { addFiles(event.target.files); event.target.value = ''; });
-for (const name of ['dragenter', 'dragover']) $('dropZone').addEventListener(name, (event) => { event.preventDefault(); $('dropZone').classList.add('dragging'); });
-for (const name of ['dragleave', 'drop']) $('dropZone').addEventListener(name, (event) => { event.preventDefault(); $('dropZone').classList.remove('dragging'); });
+
+for (const name of ['dragenter', 'dragover']) {
+  $('dropZone').addEventListener(name, (event) => { event.preventDefault(); $('dropZone').classList.add('dragging'); });
+}
+for (const name of ['dragleave', 'drop']) {
+  $('dropZone').addEventListener(name, (event) => { event.preventDefault(); $('dropZone').classList.remove('dragging'); });
+}
 $('dropZone').addEventListener('drop', (event) => addFiles(event.dataTransfer.files));
-$('removeButton').addEventListener('click', () => { for (let i = queue.length - 1; i >= 0; i--) if (selected.has(queue[i].key)) queue.splice(i, 1); selected.clear(); renderQueue(); });
-$('clearButton').addEventListener('click', () => { queue.length = 0; selected.clear(); renderQueue(); });
+
+$('selectAllCheckbox')?.addEventListener('change', (event) => {
+  if (event.target.checked) {
+    queue.forEach((item) => selected.add(item.key));
+  } else {
+    selected.clear();
+  }
+  renderQueue();
+});
+
+$('removeButton').addEventListener('click', () => {
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (selected.has(queue[i].key)) queue.splice(i, 1);
+  }
+  selected.clear();
+  renderQueue();
+});
+
+$('clearButton').addEventListener('click', () => {
+  queue.length = 0;
+  selected.clear();
+  currentResult = null;
+  renderQueue();
+});
+
 $('convertButton').addEventListener('click', convertAll);
-$('stopButton').addEventListener('click', async () => { stopping = true; $('workStage').textContent = 'Stopping safely…'; try { await currentDoc?.terminate(); } catch { /* worker is stopping */ } });
-$('copyDetails').addEventListener('click', async () => { await navigator.clipboard.writeText($('detailsLog').textContent); $('copyDetails').textContent = 'Copied'; setTimeout(() => $('copyDetails').textContent = 'Copy details', 1200); });
-$('closeViewer').addEventListener('click', () => $('viewer').close());
+
+// Dedicated "View Output" Button in main action bar
+$('viewOutputButton')?.addEventListener('click', () => {
+  const res = getSelectedOrLatestResult();
+  if (res) openViewer(res);
+});
+
+// Result panel buttons
+$('resultViewButton')?.addEventListener('click', () => {
+  const res = getSelectedOrLatestResult();
+  if (res) openViewer(res);
+});
+
+$('resultDownloadButton')?.addEventListener('click', () => {
+  const res = getSelectedOrLatestResult();
+  if (res) downloadResult(res);
+});
+
+$('stopButton').addEventListener('click', async () => {
+  stopping = true;
+  $('workStage').textContent = 'Stopping safely…';
+  try { await currentDoc?.terminate(); } catch { /* worker is stopping */ }
+});
+
+$('copyDetails').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('detailsLog').textContent);
+  $('copyDetails').textContent = 'Copied';
+  setTimeout(() => $('copyDetails').textContent = 'Copy details', 1200);
+});
+
+$('closeViewer').addEventListener('click', closeViewer);
 $('previewTab').addEventListener('click', () => selectViewerTab('preview'));
 $('sourceTab').addEventListener('click', () => selectViewerTab('source'));
 $('downloadButton').addEventListener('click', () => currentResult && downloadResult(currentResult));
 $('printButton').addEventListener('click', () => window.print());
-$('viewer').addEventListener('click', (event) => { if (event.target === $('viewer')) $('viewer').close(); });
-window.addEventListener('beforeunload', (event) => { if (running) { event.preventDefault(); event.returnValue = ''; } });
+$('viewer').addEventListener('click', (event) => { if (event.target === $('viewer')) closeViewer(); });
 
-log('Ready. No document data is sent to PDF2AI or stored on a server.');
+window.addEventListener('beforeunload', (event) => {
+  if (running) { event.preventDefault(); event.returnValue = ''; }
+});
+
+log('Ready. All PDF processing runs locally on this device.');
 renderQueue();

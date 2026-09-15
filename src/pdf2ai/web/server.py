@@ -47,11 +47,7 @@ def create_app(token: str = None) -> FastAPI:
         return response
 
     if dist_dir.exists() and (dist_dir / 'index.html').is_file():
-        @app.get('/')
-        async def index():
-            return FileResponse(dist_dir / 'index.html')
-
-        app.mount('/', StaticFiles(directory=str(dist_dir)), name='static')
+        app.mount('/', StaticFiles(directory=str(dist_dir), html=True), name='static')
     else:
         @app.get('/')
         async def fallback():

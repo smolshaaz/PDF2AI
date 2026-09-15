@@ -41,7 +41,15 @@
 
       <section class="queue-panel" aria-label="PDF queue">
         <table>
-          <thead><tr><th></th><th>File</th><th>Pages</th><th>Status</th><th></th></tr></thead>
+          <thead>
+            <tr>
+              <th style="width: 38px;"><input id="selectAllCheckbox" type="checkbox" aria-label="Select all" /></th>
+              <th>File</th>
+              <th style="width: 65px; text-align: center;">Pages</th>
+              <th style="width: 140px;">Status</th>
+              <th style="width: 140px; text-align: right;">Action</th>
+            </tr>
+          </thead>
           <tbody id="queueBody"></tbody>
         </table>
         <div id="emptyQueue" class="empty-queue">PDFs you add will appear here.</div>
@@ -61,10 +69,20 @@
 
       <section id="resultPanel" class="result-panel" hidden aria-live="polite">
         <div class="result-icon">✓</div>
-        <div><strong id="resultTitle"></strong><span id="resultNote"></span></div>
+        <div class="result-info">
+          <strong id="resultTitle"></strong>
+          <span id="resultNote"></span>
+        </div>
+        <div class="result-actions">
+          <button id="resultViewButton" class="result-view-btn" type="button">👁️ View Output</button>
+          <button id="resultDownloadButton" class="result-download-btn" type="button">⬇️ Download</button>
+        </div>
       </section>
 
-      <button id="convertButton" class="convert-button" type="button" disabled>Convert</button>
+      <div class="action-bar">
+        <button id="convertButton" class="convert-button" type="button" disabled>Convert</button>
+        <button id="viewOutputButton" class="view-output-button" type="button" disabled>👁️ View Output</button>
+      </div>
 
       <details class="details-panel">
         <summary>Details</summary>
