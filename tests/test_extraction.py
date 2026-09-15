@@ -7,6 +7,72 @@ from pdf2ai.extraction.converter import convert_pdf, PDFError
 pytestmark = pytest.mark.integration
 
 
+def test_uncertain_ocr_is_marked_and_flagged(tmp_path, ocr_state, monkeypatch):
+    import numpy as np
+    from pdf2ai.extraction import multilingual_ocr as ocr
+    from pymupdf4llm.ocr import OCRMode
+    import pymupdf4llm
+
+    monkeypatch.setattr(ocr, 'full_ocr', lambda image, progress: [
+        (np.array([[100,200],[1000,200],[1000,280],[100,280]]), 'UNCERTAIN WATERMARK', .84),
+        (np.array([[100,400],[1000,400],[1000,480],[100,480]]), 'POLICY LIMIT 5000', .85),
+    ])
+    path = tmp_path / 'uncertain.pdf'
+    with pymupdf.open() as original:
+        p = original.new_page(width=600, height=400)
+        p.insert_text((40,60), 'Some scanned text', fontsize=20)
+        raster = p.get_pixmap(dpi=150).tobytes('png')
+    with pymupdf.open() as doc:
+        p = doc.new_page(width=600, height=400)
+        p.insert_image(p.rect, stream=raster)
+        p = doc.new_page()
+        p.insert_text((60,60), 'NATIVE TEXT')
+        doc.save(path)
+    actual = pymupdf4llm.to_markdown
+    modes = []
+    def capture(*args, **kwargs):
+        modes.append(kwargs['use_ocr'])
+        return actual(*args, **kwargs)
+    monkeypatch.setattr(pymupdf4llm, 'to_markdown', capture)
+    result = convert_pdf(path, ocr_state)
+    text = Path(result['output']).read_text()
+    assert '[illegible]' in text
+    assert 'UNCERTAIN WATERMARK' not in text
+    assert 'POLICY LIMIT 5000' in text
+    assert 'NATIVE TEXT' in text
+    assert result['timings'][0]['ocr']['illegible_regions'] == 1
+    assert any('review pages: 1' in warning for warning in result['warnings'])
+    assert modes == [False, OCRMode.SELECT_DROP_OLD]
+
+
+@pytest.mark.parametrize('native_header', [False, True])
+def test_replaces_stale_invisible_ocr(tmp_path, ocr_state, native_header):
+    """Read the raster even when a scanner supplied plausible but wrong text."""
+    source = tmp_path / 'stale-ocr.pdf'
+    expected = 'POLICY LIMIT: 5000'
+    stale = 'POLICY LIMIT: 9000'
+    with pymupdf.open() as original:
+        page = original.new_page(width=600, height=400)
+        page.insert_text((50, 160), expected, fontsize=24)
+        raster = page.get_pixmap(dpi=150).tobytes('png')
+    with pymupdf.open() as document:
+        page = document.new_page(width=600, height=400)
+        page.insert_image(page.rect, stream=raster)
+        page.insert_text((50, 160), stale, fontsize=24, render_mode=3)
+        if native_header:
+            page.insert_text((50, 50), 'NATIVE REFERENCE ABC123', fontsize=12)
+        document.save(source)
+    original_bytes = source.read_bytes()
+    result = convert_pdf(source, ocr_state)
+    text = Path(result['output']).read_text(encoding='utf-8')
+    assert expected in text
+    assert stale not in text
+    assert result['timings'][0]['ocr']['lines'] > 0
+    if native_header:
+        assert text.count('NATIVE REFERENCE ABC123') == 1
+    assert source.read_bytes() == original_bytes
+
+
 def test_digital_fidelity_and_blank(digital_pdf, ocr_state, monkeypatch):
     from pdf2ai.extraction import multilingual_ocr
     def unexpected_ocr(*args, **kwargs):

@@ -1,4 +1,7 @@
 .venv/
+node_modules/
+.DS_Store
+tmp/
 __pycache__/
 *.py[cod]
 *.egg-info/

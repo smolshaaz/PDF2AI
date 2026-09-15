@@ -1,4 +1,4 @@
-"""Page-progress PyMuPDF4LLM extraction; no content rewriting or networking."""
+"""Page-progress local extraction with explicit markers for uncertain OCR."""
 import errno
 import os
 from pathlib import Path
@@ -72,6 +72,7 @@ def friendly_error(exc: Exception) -> str:
 def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progress=None, temp_prefix=".pdf2ai-") -> dict:
     enforce_offline()
     import pymupdf4llm
+    from pymupdf4llm.ocr import OCRMode
     import pymupdf
     source = Path(source).resolve()
     started = time.monotonic()
@@ -126,8 +127,8 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
             multilingual_ocr.LAST_LOW_CONFIDENCE = False
             multilingual_ocr.LAST_METRICS = {}
             page = doc[page_number]
-            scanned = not page.get_text().strip() and bool(page.get_images())
-            options["use_ocr"] = state["available"]
+            scanned = multilingual_ocr.needs_scan_ocr(page)
+            options["use_ocr"] = OCRMode.SELECT_DROP_OLD if state["available"] else False
             if scanned and state["available"]:
                 report(page_number, "Recognizing scanned page")
                 multilingual_ocr.exec_ocr(page, progress=lambda stage: report(page_number, stage))
@@ -152,7 +153,7 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
         raise PDFError("The extraction engine returned an unexpected format. Reinstall PDF2AI.")
     ordered, warnings = inspect_chunks(chunks, count)
     if uncertain:
-        warnings.append("Some text was difficult to recognize; review pages: " + ", ".join(map(str, uncertain)))
+        warnings.append("Uncertain text was replaced with [illegible]; review pages: " + ", ".join(map(str, uncertain)))
     if not state["available"]:
         warnings.insert(0, "Scanned pages could not be recognized because local OCR is unavailable. This output may be incomplete.")
     folder = output_dir if output_dir is not None else source.parent / "PDF2AI Output"

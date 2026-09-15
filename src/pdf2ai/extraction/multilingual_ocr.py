@@ -12,6 +12,11 @@ _LOCK = threading.Lock()
 LAST_LOW_CONFIDENCE = False
 LAST_METRICS = {}
 
+# Applied only after language/orientation/recognition retries. This is a
+# presentation cutoff, not a calibrated measure of whether text is correct.
+NOISE_FLOOR = 0.85
+ILLEGIBLE_MARKER = "[illegible]"
+
 
 def asset_path(*parts):
     return Path(str(files("pdf2ai.assets").joinpath(*parts)))
@@ -187,7 +192,7 @@ def full_ocr(image, progress=None):
     for i in arabic_lines:
         # PyMuPDF reorders the positioned PDF text layer during extraction.
         texts[i], scores[i] = get_display(arabic[i][0]), arabic[i][1]
-    LAST_LOW_CONFIDENCE = any(s < .80 for s in scores)
+    LAST_LOW_CONFIDENCE = any(s < NOISE_FLOOR for s in scores)
     LAST_METRICS["lines"] = count
     LAST_METRICS["printed_retries"] = len(low)
     LAST_METRICS["arabic_lines"] = len(arabic_lines)
@@ -206,16 +211,42 @@ def smoke_test():
         raise RuntimeError("Bundled font lacks Arabic glyphs")
 
 
+def is_ocr_span(span):
+    """Identify non-rendering text using the installed engine's definition.
+
+    Invisibility identifies a potential OCR layer, not whether it is accurate.
+    """
+    from pymupdf4llm.ocr.exec_ocr_interface import ocr_text
+    return ocr_text(span)
+
+
+def needs_scan_ocr(page):
+    """Refresh image pages with hidden text, including mixed native headers."""
+    if not page.get_images():
+        return False
+    import pymupdf
+    has_visible_text = False
+    for block in page.get_text('dict', flags=pymupdf.TEXT_ACCURATE_BBOXES)['blocks']:
+        for line in block.get('lines', ()):
+            for span in line['spans']:
+                if not span['text'].strip():
+                    continue
+                if is_ocr_span(span):
+                    return True
+                has_visible_text = True
+    return not has_visible_text
+
+
 def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False, progress=None):
+    global LAST_LOW_CONFIDENCE
     initialize()
     import pymupdf
-    from pymupdf4llm.ocr.exec_ocr_interface import ocr_text
     from pymupdf4llm.ocr.get_culled_pixmap import get_pixmap
     healthy, replace = [], []
     for block in page.get_text("dict", flags=pymupdf.TEXT_ACCURATE_BBOXES)["blocks"]:
         for line in block.get("lines", ()):
             for span in line["spans"]:
-                if ocr_text(span):
+                if is_ocr_span(span):
                     if keep_ocr_text:
                         return
                     replace.append(span["bbox"])
@@ -240,6 +271,10 @@ def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False, pro
     for box, text, score in result:
         if not text.strip():
             continue
+        if score < NOISE_FLOOR:
+            text = ILLEGIBLE_MARKER
+            LAST_LOW_CONFIDENCE = True
+            LAST_METRICS['illegible_regions'] = LAST_METRICS.get('illegible_regions', 0) + 1
         rect = pymupdf.Rect(float(np.min(box[:, 0])), float(np.min(box[:, 1])),
                            float(np.max(box[:, 0])), float(np.max(box[:, 1]))) * matrix
         # The official adapter assumes a font with near-unit line height.
@@ -249,5 +284,8 @@ def exec_ocr(page, dpi=300, pixmap=None, language=None, keep_ocr_text=False, pro
         origin = pymupdf.Point(rect.x0, rect.y0 + size * _FONT.ascender)
         width = _FONT.text_length(text, fontsize=size)
         if width > 0:
-            page.insert_text(origin, text, fontsize=size, fontname="pdf2aiocr", render_mode=3,
+            # Layout can ignore hidden spans when visible native text is also
+            # present. This layer exists only in the in-memory working document;
+            # use the official adapter's filled-text mode so both are extracted.
+            page.insert_text(origin, text, fontsize=size, fontname="pdf2aiocr", render_mode=0,
                              morph=(origin, pymupdf.Matrix(rect.width / width, 1)))
