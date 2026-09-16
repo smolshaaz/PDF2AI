@@ -135,10 +135,10 @@ def language_probes(boxes, width):
     return groups, probes
 
 
-def full_ocr(image, progress=None):
+def full_ocr(image, progress=None, detail_image=None):
     from pdf2ai.extraction.acceleration import disable_gpu
     try:
-        return _full_ocr(image, progress)
+        return _full_ocr(image, progress, detail_image)
     except Exception as exc:
         if not disable_gpu(exc):
             raise
@@ -147,10 +147,10 @@ def full_ocr(image, progress=None):
         shutdown()
         if progress:
             progress("Graphics acceleration unavailable; continuing on CPU")
-        return _full_ocr(image, progress)
+        return _full_ocr(image, progress, detail_image)
 
 
-def _full_ocr(image, progress=None):
+def _full_ocr(image, progress=None, detail_image=None):
     global LAST_LOW_CONFIDENCE, LAST_METRICS
     initialize()
     from pdf2ai.extraction.acceleration import effective_provider
@@ -224,6 +224,20 @@ def _full_ocr(image, progress=None):
     # tiny characters are not irreversibly downsampled before recognition.
     original_boxes = map_boxes_to_original(detection.boxes.copy(), operations, original.shape[0], original.shape[1])
     crops = _ENGINE.crop_text_regions(original, original_boxes)
+    # Low-DPI detection is sufficient to locate text, but resizing its tiny
+    # letter pixels back up for recognition cannot restore lost detail. Read
+    # small lines from one lazily rendered detail image instead. This is still
+    # one recognition pass, with the same model and the same page coordinates.
+    small_lines = [i for i, crop in enumerate(crops) if crop.shape[0] < 32]
+    if small_lines and detail_image is not None:
+        detail = stage("Reading small print at higher resolution", detail_image)
+        if detail is not None:
+            boxes = original_boxes[small_lines].copy()
+            boxes[:, :, 0] *= detail.shape[1] / original.shape[1]
+            boxes[:, :, 1] *= detail.shape[0] / original.shape[0]
+            for i, crop in zip(small_lines, _ENGINE.crop_text_regions(detail, boxes)):
+                crops[i] = crop
+            LAST_METRICS["detail_regions"] = len(small_lines)
     # One primary recognition pass. Arabic routing is needed because the v6
     # Latin/CJK recognizer does not cover Arabic; there are no quality retries.
     primary = read_crops("Reading printed text", _ENGINE.text_rec, crops)
@@ -331,7 +345,21 @@ def exec_ocr(page, dpi=OCR_DPI, pixmap=None, language=None, keep_ocr_text=False,
     if progress:
         progress(f"Page raster ready: {pix.width} × {pix.height} pixels")
     image = np.frombuffer(pix.samples_mv, dtype=np.uint8).reshape(pix.height, pix.width, 3)
-    result = full_ocr(image, progress)
+    detail_pix = None
+    def detail_image():
+        nonlocal detail_pix
+        detail_dpi = max(36, min(300, int(72 * 3000 / max(page.rect.width, page.rect.height))))
+        if detail_dpi <= dpi:
+            return None
+        if detail_pix is None:
+            if healthy:
+                detail_pix, _ = get_pixmap(page.get_displaylist(), dpi=detail_dpi, rects=healthy, empty_threshold=250)
+            else:
+                detail_pix = page.get_pixmap(dpi=detail_dpi, colorspace=pymupdf.csRGB, alpha=False)
+        LAST_METRICS["detail_dpi"] = detail_dpi
+        return np.frombuffer(detail_pix.samples_mv, dtype=np.uint8).reshape(detail_pix.height, detail_pix.width, 3)
+
+    result = full_ocr(image, progress, detail_image=detail_image)
     LAST_METRICS.update(dpi=dpi, raster_width=pix.width, raster_height=pix.height)
     matrix = pymupdf.Rect(pix.irect).torect(page.rect)
     for rect in replace:

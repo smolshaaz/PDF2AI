@@ -14,7 +14,7 @@ def test_uncertain_ocr_is_preserved_and_flagged(tmp_path, ocr_state, monkeypatch
     from pymupdf4llm.ocr import OCRMode
     import pymupdf4llm
 
-    monkeypatch.setattr(ocr, 'full_ocr', lambda image, progress: [
+    monkeypatch.setattr(ocr, 'full_ocr', lambda image, progress, **kwargs: [
         (np.array([[100,200],[1000,200],[1000,280],[100,280]]), 'UNCERTAIN WATERMARK', .84),
         (np.array([[100,400],[1000,400],[1000,480],[100,480]]), 'POLICY LIMIT 5000', .85),
     ])
@@ -309,7 +309,7 @@ def test_printed_bilingual_columns(tmp_path, ocr_state, qtbot):
     # Check all clause identities and their order, independently of colon/space
     # placement, which OCR and Markdown layout can format differently.
     clause_numbers = [int(number) for number in re.findall(r"\bClause\s*(\d+)\b", output)]
-    assert clause_numbers == list(range(1, 13))
+    assert clause_numbers == list(range(1, 13)), [line for line in output.splitlines() if "Clause" in line]
     assert result["timings"][0]["ocr"]["arabic_lines"] == 12
 
 
@@ -317,7 +317,7 @@ def test_ocr_boxes_match_detected_lines(tmp_path, ocr_state, monkeypatch):
     """Arabic-capable font metrics must not expand OCR boxes across rows."""
     import numpy as np
     from pdf2ai.extraction import multilingual_ocr as ocr
-    monkeypatch.setattr(ocr, 'full_ocr', lambda image, progress: [
+    monkeypatch.setattr(ocr, 'full_ocr', lambda image, progress, **kwargs: [
         (np.array([[40,40],[240,40],[240,60],[40,60]]), 'First row', .99),
         (np.array([[40,70],[240,70],[240,90],[40,90]]), 'Second row', .99),
     ])
