@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import socket
 import pytest
 import pymupdf
@@ -305,8 +306,10 @@ def test_printed_bilingual_columns(tmp_path, ocr_state, qtbot):
     assert output.count("Flood damage is excluded") == 12
     assert output.count(arabic) == 12
     assert "Clause 1:" in output and "Clause 12:" in output
-    assert [output.index(f"Clause {number}:") for number in range(1, 13)] == sorted(
-        output.index(f"Clause {number}:") for number in range(1, 13))
+    # Check all clause identities and their order, independently of colon/space
+    # placement, which OCR and Markdown layout can format differently.
+    clause_numbers = [int(number) for number in re.findall(r"\bClause\s*(\d+)\b", output)]
+    assert clause_numbers == list(range(1, 13))
     assert result["timings"][0]["ocr"]["arabic_lines"] == 12
 
 
