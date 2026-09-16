@@ -93,7 +93,8 @@ def test_digital_fidelity_and_blank(digital_pdf, ocr_state, monkeypatch):
     assert Path(second["output"]).name == "policy.ai (2).md"
 
 
-def test_table(tmp_path, ocr_state):
+@pytest.mark.parametrize("scanned", [False, True])
+def test_table(tmp_path, ocr_state, scanned):
     path = tmp_path / "table.pdf"
     with pymupdf.open() as doc:
         page = doc.new_page()
@@ -105,10 +106,23 @@ def test_table(tmp_path, ocr_state):
         for row, values in enumerate([("Benefit", "Limit"), ("Hospital", "5000"), ("Dental", "1000")]):
             for col, value in enumerate(values):
                 page.insert_text((60 + col * 200, 125 + row * 40), value)
-        doc.save(path)
+        if scanned:
+            image = page.get_pixmap(dpi=200, alpha=False).tobytes("png")
+            with pymupdf.open() as scan:
+                scan.new_page(width=page.rect.width, height=page.rect.height).insert_image(page.rect, stream=image)
+                scan.save(path)
+        else:
+            doc.save(path)
     output = Path(convert_pdf(path, ocr_state)["output"]).read_text()
     assert "Hospital" in output and "5000" in output and "Dental" in output
     assert "|" in output
+    # As in olmOCR-Bench's neighbor checks, keeping every token is insufficient:
+    # a value must still belong to the correct benefit and column.
+    rows = [[cell.strip() for cell in line.strip().strip("|").split("|")]
+            for line in output.splitlines() if "|" in line]
+    assert ["Benefit", "Limit"] in rows
+    assert ["Hospital", "5000"] in rows
+    assert ["Dental", "1000"] in rows
 
 
 def test_scanned_pdf(tmp_path, ocr_state):
@@ -291,6 +305,8 @@ def test_printed_bilingual_columns(tmp_path, ocr_state, qtbot):
     assert output.count("Flood damage is excluded") == 12
     assert output.count(arabic) == 12
     assert "Clause 1:" in output and "Clause 12:" in output
+    assert [output.index(f"Clause {number}:") for number in range(1, 13)] == sorted(
+        output.index(f"Clause {number}:") for number in range(1, 13))
     assert result["timings"][0]["ocr"]["arabic_lines"] == 12
 
 

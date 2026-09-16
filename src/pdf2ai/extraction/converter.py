@@ -44,7 +44,7 @@ def check_ocr(lightweight=False) -> dict:
             multilingual_ocr.smoke_test()
         return {
             "available": True,
-            "detail": "Printed-document OCR: dedicated English/Arabic readers + bounded PP-OCRv6 medium review / ONNX Runtime",
+            "detail": "Printed-document OCR: PP-OCRv6 small with Paddle Arabic routing / 200 DPI / ONNX Runtime",
         }
     except Exception as exc:
         # Exception strings from OCR may include recognized content. Never log them.
@@ -97,14 +97,13 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
         # Explicit activation fails if Layout is unavailable; never silently fall
         # back to the legacy engine, where OCR/settings have different behavior.
         pymupdf4llm.use_layout(True)
+        from pdf2ai.extraction import multilingual_ocr
         options = dict(
             page_chunks=True,
             use_ocr=state["available"],
             force_ocr=False,
-            # A generated 150-DPI scan lost a complete 6-point legal footnote
-            # at 150 OCR DPI and recovered it at 300. Native-text pages still
-            # skip OCR through PyMuPDF4LLM's selective page analysis.
-            ocr_dpi=300,
+            # Normal office scans render at 200 DPI; native text remains native.
+            ocr_dpi=multilingual_ocr.OCR_DPI,
             header=True,
             footer=True,
             force_text=True,
@@ -112,7 +111,6 @@ def convert_pdf(source, ocr_state=None, output_dir: Optional[Path] = None, progr
             embed_images=False,
             show_progress=False,
         )
-        from pdf2ai.extraction import multilingual_ocr
         def report(done, stage):
             if progress:
                 progress(done, count, stage, time.monotonic() - started)

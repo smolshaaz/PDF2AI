@@ -10,17 +10,16 @@ echo.
 
 REM ── 1. Verify 64-bit Python ─────────────────────────────────────────────
 echo [1/7] Verifying 64-bit Python...
-set "PYCMD=py -3"
-py -3 --version >nul 2>&1
+REM Prefer setup-python's PATH interpreter, not the launcher's newest Python.
+set "PYCMD=python"
+python -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 13) else 1)" >nul 2>&1
 if errorlevel 1 (
-    set "PYCMD=python"
+    set "PYCMD=py -3.13"
 )
-%PYCMD% -c "import struct, sys; bits=struct.calcsize('P')*8; print(f'Python {sys.version.split()[0]} ({bits}-bit)'); sys.exit(0 if bits==64 else 1)"
+%PYCMD% -c "import struct, sys; bits=struct.calcsize('P')*8; print(f'Python {sys.version.split()[0]} ({bits}-bit)'); sys.exit(0 if bits==64 and sys.version_info[:2] == (3, 13) else 1)"
 if errorlevel 1 (
     echo.
-    echo ERROR: A 64-bit Python 3.x interpreter is required to build PDF2AI.
-    echo        The currently selected Python is 32-bit, which will produce a
-    echo        32-bit application that cannot load 64-bit native libraries.
+    echo ERROR: A 64-bit Python 3.13 interpreter is required for this release build.
     echo.
     echo        Install 64-bit Python 3.13 from https://python.org and retry.
     echo.
@@ -37,12 +36,21 @@ if not exist .venv\Scripts\python.exe (
         exit /b 1
     )
 )
+.venv\Scripts\python.exe -c "import struct, sys; sys.exit(0 if struct.calcsize('P') == 8 and sys.version_info[:2] == (3, 13) else 1)"
+if errorlevel 1 (
+    echo ERROR: Existing .venv uses the wrong Python. Rename it and rerun this script.
+    exit /b 1
+)
 .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
 if errorlevel 1 exit /b 1
 
 REM ── 3. Install pinned dependencies ──────────────────────────────────────
 echo.
 echo [3/7] Installing pinned dependencies...
+REM All ONNX Runtime variants share the onnxruntime package directory. Remove
+REM previous variants before installing the exclusive Windows DirectML wheel.
+.venv\Scripts\python.exe -m pip uninstall --quiet -y onnxruntime onnxruntime-gpu onnxruntime-directml
+if errorlevel 1 exit /b 1
 .venv\Scripts\python.exe -m pip install --quiet -e ".[dev,build]"
 if errorlevel 1 (
     echo ERROR: pip install failed. Check your internet connection and pyproject.toml.
