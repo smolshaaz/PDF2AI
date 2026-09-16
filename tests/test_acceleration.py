@@ -51,12 +51,15 @@ def test_cpu_failure_does_not_request_gpu_retry():
 
 def test_directml_session_options_leave_cpu_settings_intact(monkeypatch):
     from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+    from rapidocr.inference_engine.onnxruntime.provider_config import ProviderConfig
+    from onnxruntime.capi.onnxruntime_inference_collection import check_and_normalize_provider_args
     from rapidocr.main import DEFAULT_CFG_PATH
     from rapidocr.utils.parse_parameters import ParseParams
 
     # Register restoration before the compatibility shim changes the factory.
     original = OrtInferSession.__dict__["_init_sess_opts"]
     monkeypatch.setattr(OrtInferSession, "_init_sess_opts", original)
+    monkeypatch.setattr(ProviderConfig, "dml_ep_cfg", ProviderConfig.dml_ep_cfg)
     monkeypatch.setattr(acceleration, "_SESSION_OPTIONS_PATCHED", False)
     cfg = ParseParams.load(DEFAULT_CFG_PATH).EngineConfig.onnxruntime
     cpu_before = OrtInferSession._init_sess_opts(cfg)
@@ -66,6 +69,12 @@ def test_directml_session_options_leave_cpu_settings_intact(monkeypatch):
     options = OrtInferSession._init_sess_opts(cfg)
     assert options.enable_mem_pattern is False
     assert options.execution_mode == onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+    cfg.dml_ep_cfg = {"device_id": 0}
+    provider_options = ProviderConfig(cfg).dml_ep_cfg()
+    providers, normalized_options = check_and_normalize_provider_args(
+        [("DmlExecutionProvider", provider_options)], None, ["DmlExecutionProvider"])
+    assert providers == ["DmlExecutionProvider"]
+    assert normalized_options == [{"device_id": "0"}]
 
     cfg.use_dml = False
     cpu_after = OrtInferSession._init_sess_opts(cfg)

@@ -16,10 +16,10 @@ _LOG = logging.getLogger("pdf2ai")
 
 
 def _configure_directml_sessions():
-    """Supply the two required DML options missing from pinned RapidOCR 3.9.2.
+    """Supply required DML options and a plain provider dictionary for 3.9.2.
 
-    This changes only RapidOCR's session-options factory, only for sessions
-    explicitly requesting DML. CPU settings and OCR/model code stay upstream.
+    This adjusts RapidOCR's session options and provider dictionary for DML.
+    CPU settings and OCR/model code stay upstream.
     https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html
     """
     global _SESSION_OPTIONS_PATCHED
@@ -27,6 +27,7 @@ def _configure_directml_sessions():
         return
     from onnxruntime import ExecutionMode
     from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+    from rapidocr.inference_engine.onnxruntime.provider_config import ProviderConfig
 
     original = OrtInferSession._init_sess_opts
 
@@ -38,6 +39,13 @@ def _configure_directml_sessions():
         return options
 
     OrtInferSession._init_sess_opts = staticmethod(session_options)
+    # RapidOCR returns OmegaConf's DictConfig here, while ONNX Runtime requires
+    # an actual dict in its provider tuple. Without this conversion ORT rejects
+    # the DML configuration and silently constructs a CPU-only session.
+    original_provider_options = ProviderConfig.dml_ep_cfg
+    def provider_options(config):
+        return dict(original_provider_options(config))
+    ProviderConfig.dml_ep_cfg = provider_options
     _SESSION_OPTIONS_PATCHED = True
 
 
